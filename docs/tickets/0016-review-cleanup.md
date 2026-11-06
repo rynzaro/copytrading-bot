@@ -13,4 +13,4 @@ Not blocking. Judgement calls from the Standards review.
 
 ## Vault change batch (next contract version, with Q40 storage budget if approved)
 - Distinct `swap_result` errors for "ft_transfer_call failed" vs "venue used 0", so the worker needn't infer refunds from wrap.near receipts.
-- Vault state versioning: v2 changed the Borsh layout with no migration (fine: no vault deployed yet). Before go-live, add a versioned state enum or `#[init(ignore_state)] migrate` so later `owner_upgrade` calls can load old state.
+- Vault state versioning: moved to 0019.
