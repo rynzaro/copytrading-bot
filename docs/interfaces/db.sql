@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS users (
 --   "min_mcap_usd": 0,
 --   "price_guard_x": null | number,      -- optional, multiple of target fill
 --   "slippage_bps": null | number | "unlimited",  -- required before bot runs
---   "notify": {"ntfy_topic": null|string, "telegram_chat_id": null|string, "still_active_weekly": true} }
+--   "notify": {"ntfy_topic": null|string, "telegram_chat_id": null|string, "still_active_weekly": true, "limit_orders": true} }
 
 CREATE TABLE IF NOT EXISTS copy_targets (
   owner_id   TEXT NOT NULL REFERENCES users(owner_id),
@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS activity (
 --   still_active: vault_id*
 --   sell:         token_id*, amount_in*, amount_out, tx_hash
 --   withdraw:     token_id*, amount*, tx_hash
---   limit_order:  target_id*, token_id*, pool_id*, amount_near*, price (NEAR per whole token), tx_hash*
+--   limit_order:  stage* ('placed'|'filled'), target_id*, token_id*, pool_id*, amount_near*, price (NEAR per whole token), tx_hash*
 --   system:       text*
 CREATE INDEX IF NOT EXISTS activity_unnotified ON activity(notified_at) WHERE notified_at IS NULL;
 

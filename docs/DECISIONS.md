@@ -3,7 +3,7 @@
 ## Product
 - NEAR mainnet, real funds. Disclaimer before first use, dismissible per browser, always in footer.
 - Copy meme buys only (non-meme denylist). Copy targets: curated list (root.near, seriousfarmer.near only) plus free entry.
-- Signals: executed swaps only (fill-only detection). DCL limit buy orders by a copy target: notify users who copy that target when the order is placed; never buy on them.
+- Signals: executed swaps only (fill-only detection). DCL limit buy orders by a copy target: notify users who copy that target when the order is placed and when it fills (setting `limit_orders`, default on, can be switched off); never buy on them.
 - Owners need a named account in v1 (no factory; implicit accounts get a clear message). Feed: Intear teardata optimistic tail, Intear WS backup.
 - Quote token wNEAR. Venues: Rhea DCL and Ref v1, multi-hop via RHEA allowed. No Intear (ticket 0002), no bonding curves.
 - Size ladder by mcap: < $1M S1 (10 NEAR), $1–3M S2 (5 NEAR), > $3M skip, unknown skip. No other spend limits.
