@@ -715,3 +715,19 @@ async fn gas_sizing() -> anyhow::Result<()> {
     reg.unwrap_or_else(|| panic!("register_token: {WORKER_REGISTER_TGAS} Tgas not enough"));
     Ok(())
 }
+
+/// Setup cost inputs for the web (web/src/lib/vault-setup.ts): storage the vault uses besides its code,
+/// and gas of the owner's setup batch. Run with --nocapture.
+#[tokio::test]
+async fn setup_storage_and_gas() -> anyhow::Result<()> {
+    let e = setup().await?;
+    let code = wasm("vault").len() as u64;
+    let used = e.worker.view_account(&e.vault).await?.storage_usage;
+    println!("setup: storage_usage {used} bytes, code {code}, without code {} bytes", used - code);
+    e.register(WRAP).await;
+    let after = e.worker.view_account(&e.vault).await?.storage_usage;
+    println!("setup: after wNEAR registration {} bytes without code", after - code);
+    // 1e19 yocto per byte: without code the vault must stay under 0.01 NEAR of stake
+    assert!((after - code) < 1_000, "state + key stay small");
+    Ok(())
+}

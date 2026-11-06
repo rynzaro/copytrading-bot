@@ -51,6 +51,11 @@ impl Token {
         self.balances.insert(account_id, b + amount.0);
     }
 
+    /// For the worker's route reader (e2e): 24 decimals, like wNEAR.
+    pub fn ft_metadata(&self) -> Value {
+        json!({"spec": "ft-1.0.0", "name": "Mock", "symbol": "MOCK", "decimals": 24})
+    }
+
     pub fn ft_balance_of(&self, account_id: AccountId) -> U128 {
         U128(self.balances.get(&account_id).copied().unwrap_or(0))
     }

@@ -40,7 +40,8 @@ services:
       context: ..
       dockerfile: deploy/web.Dockerfile
       args:
-        NEXT_PUBLIC_VAULT_CODE_HASH: ${NEXT_PUBLIC_VAULT_CODE_HASH:-${VAULT_CODE_HASH:-}}
+        # Same pinned hash as the worker's /vault-confirmed check: one variable, no second copy to drift.
+        NEXT_PUBLIC_VAULT_CODE_HASH: ${VAULT_CODE_HASH:-}
     restart: unless-stopped
     depends_on: [worker]
     # edge: Caddy -> web:3000, and web's way out (RPC). backend: web -> worker API.
