@@ -638,3 +638,80 @@ async fn allowance_spend_per_swap() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+// ---------------- gas sizing (ticket 0010 item 1) ----------------
+
+/// Worker defaults (worker/copytrade_worker/executor.py SWAP_GAS_TGAS, REGISTER_GAS_TGAS). Keep in sync.
+const WORKER_SWAP_TGAS: u64 = 200;
+const WORKER_REGISTER_TGAS: u64 = 50;
+
+/// Smallest prepaid gas (5 Tgas steps) that completes a buy, per route shape, and the gas burnt.
+/// Buys have at most 2 hops: intermediates are only wNEAR or RHEA and tokens can't repeat.
+/// Run with --nocapture for the table. Mock DEX: real venues burn more inside `ft_on_transfer`,
+/// which gets the 100 Tgas static share plus the unused gas.
+#[tokio::test]
+async fn gas_sizing() -> anyhow::Result<()> {
+    let e = setup().await?;
+    e.register(WRAP).await;
+    e.register(MEME).await;
+    let dcl2 = json!([{"pool_id": format!("{RHEA}|{WRAP}|2000"), "token_in": WRAP, "token_out": RHEA},
+                      {"pool_id": format!("{MEME}|{RHEA}|2000"), "token_in": RHEA, "token_out": MEME}]);
+    let ref2 = json!([{"pool_id": "12", "token_in": WRAP, "token_out": RHEA},
+                      {"pool_id": "40", "token_in": RHEA, "token_out": MEME}]);
+    let cases = [
+        ("dcl 1 hop", buy("dcl", MEME, near(1), 1)),
+        ("dcl 2 hops", json!({"args": {"venue": "dcl", "hops": dcl2, "amount_in": near(1).to_string(), "min_out": "1"}})),
+        ("ref_v1 1 hop", buy("ref_v1", MEME, near(1), 1)),
+        ("ref_v1 2 hops", json!({"args": {"venue": "ref_v1", "hops": ref2, "amount_in": near(1).to_string(), "min_out": "1"}})),
+    ];
+    let mut worst = 0;
+    for (name, args) in cases {
+        let mut min = None;
+        for tgas in (150..=WORKER_SWAP_TGAS).step_by(5) {
+            let before = ft_bal(&e.worker, MEME, &e.vault).await;
+            let r = e
+                .bot
+                .call(&e.vault, "swap")
+                .args_json(args.clone())
+                .gas(near_workspaces::types::Gas::from_tgas(tgas))
+                .transact()
+                .await?;
+            let ok = r.is_success()
+                && event(&events(&r.logs()), "swap_result").is_some_and(|v| v["data"]["amount_out"].is_string())
+                && ft_bal(&e.worker, MEME, &e.vault).await == before + near(2);
+            if ok {
+                println!("gas {name}: min prepaid {tgas} Tgas, burnt {} Tgas", r.total_gas_burnt.as_tgas());
+                min = Some(tgas);
+                break;
+            }
+        }
+        let min = min.unwrap_or_else(|| panic!("{name}: {WORKER_SWAP_TGAS} Tgas not enough"));
+        worst = worst.max(min);
+    }
+    println!("gas swap: worst min prepaid {worst} Tgas, worker sends {WORKER_SWAP_TGAS} Tgas");
+    let mut reg = None;
+    for (i, tgas) in (10..=WORKER_REGISTER_TGAS).step_by(5).enumerate() {
+        // a fresh token per try: register_token skips when already registered
+        let t = format!("t{i}.test.near");
+        let root = e.worker.root_account()?;
+        let sub = format!("t{i}");
+        let acc = root.create_subaccount(&sub).initial_balance(NearToken::from_near(10)).transact().await?.into_result()?;
+        acc.deploy(&wasm("mock_ft")).await?.into_result()?;
+        acc.call(acc.id(), "new").args_json(json!({})).transact().await?.into_result()?;
+        let r = e
+            .bot
+            .call(&e.vault, "register_token")
+            .args_json(json!({"token_id": t}))
+            .gas(near_workspaces::types::Gas::from_tgas(tgas))
+            .transact()
+            .await?;
+        let paid = event(&events(&r.logs()), "token_registered").is_some();
+        if r.is_success() && paid {
+            println!("gas register_token: min prepaid {tgas} Tgas, burnt {} Tgas", r.total_gas_burnt.as_tgas());
+            reg = Some(tgas);
+            break;
+        }
+    }
+    reg.unwrap_or_else(|| panic!("register_token: {WORKER_REGISTER_TGAS} Tgas not enough"));
+    Ok(())
+}

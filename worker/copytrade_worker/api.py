@@ -17,12 +17,31 @@ log = logging.getLogger("copytrade.api")
 MAX_BODY = 4096
 
 
+BOT_METHODS = ["swap", "register_token"]  # vault.md: exactly the bot key's methods
+
+
+def code_matches(acct: Any, pinned: str) -> bool:
+    """The vault runs the pinned code: global contract by that hash (mainnet), or deployed code with that hash
+    (test wallets). A global contract by publisher account id is refused: the publisher could re-point it."""
+    if not isinstance(acct, dict) or not pinned:
+        return False
+    if acct.get("global_contract_account_id"):
+        return False
+    return pinned in (acct.get("global_contract_hash"), acct.get("code_hash"))
+
+
 class App:
     def __init__(self, db: sqlite3.Connection, rpc: Any, keystore: K.KeyStore,
-                 health_parts: Callable[[], dict] | None = None):
+                 health_parts: Callable[[], dict] | None = None, code_hash: str | None = None,
+                 on_confirmed: Callable[[str, str], None] | None = None):
         """health_parts: the signal side's part of /health, {"feeds", "last_signal_at"} (service.Signals.health_json).
-        None: no feeds, last_signal_at read from the DB."""
+        None: no feeds, last_signal_at read from the DB.
+        code_hash: the pinned vault code hash (env VAULT_CODE_HASH when None). Unset: /vault-confirmed refuses.
+        on_confirmed(owner, vault): after a vault is confirmed (service: bot registers the vault on wNEAR).
+        Its errors are logged, never fail the confirm."""
         self.db, self.rpc, self.ks, self.health_parts = db, rpc, keystore, health_parts
+        self.code_hash = (os.environ.get("VAULT_CODE_HASH", "") if code_hash is None else code_hash).strip()
+        self.on_confirmed = on_confirmed
         self.lock = threading.Lock()
 
     def bot_key(self, body: dict) -> tuple[int, dict]:
@@ -45,6 +64,8 @@ class App:
         if not row or not row["bot_public_key"]:
             return 404, {"error": "unknown owner or no bot key"}
         pk = row["bot_public_key"]
+        if not self.code_hash:
+            return 503, {"error": "VAULT_CODE_HASH not set"}
         try:
             st = self.rpc.call_view(vault, "get_state", {})
         except (RpcError, OSError, ValueError):
@@ -58,13 +79,26 @@ class App:
         except (RpcError, OSError, ValueError):
             return 409, {"error": "bot key not on vault account"}
         perm = (ak or {}).get("permission")
-        if not isinstance(perm, dict) or "FunctionCall" not in perm or perm["FunctionCall"].get("receiver_id") != vault:
+        fc = perm.get("FunctionCall") if isinstance(perm, dict) else None
+        methods = sorted(fc.get("method_names") or []) if isinstance(fc, dict) else None
+        if not isinstance(fc, dict) or fc.get("receiver_id") != vault or methods != sorted(BOT_METHODS):
             return 409, {"error": "bot key permission"}
+        try:
+            acct = self.rpc.view_account(vault)
+        except (RpcError, OSError, ValueError):
+            return 502, {"error": "rpc"}
+        if not code_matches(acct, self.code_hash):
+            return 409, {"error": "vault code hash mismatch"}
         try:
             with self.lock:
                 self.db.execute("UPDATE users SET vault_id = ? WHERE owner_id = ?", (vault, owner))
         except sqlite3.IntegrityError:
             return 409, {"error": "vault_id taken"}
+        if self.on_confirmed is not None:
+            try:
+                self.on_confirmed(owner, vault)
+            except Exception:  # noqa: BLE001 - the vault is confirmed; the executor registers wNEAR again if needed
+                log.exception("on_confirmed %s", vault)
         return 200, {"ok": True}
 
     def health(self) -> tuple[int, dict]:

@@ -10,7 +10,9 @@ from copytrade_worker.db import connect
 
 from .fakes import FakeRpc
 
-OWNER, VAULT = "alice.near", "alice-vault.near"
+OWNER, VAULT = "alice.near", "copytrade.alice.near"
+HASH = "8kPzWhcBXaQX3rUJzNJo2U8KcU9xUZoTT3qQKcVN3r3H"
+NO_CODE = "11111111111111111111111111111111"
 
 
 @pytest.fixture
@@ -24,8 +26,10 @@ def srv(tmp_path):
         r = db.execute("SELECT MAX(seen_at) FROM signals").fetchone()
         return {"feeds": {"teardata": "ok"}, "last_signal_at": r[0]}
 
-    app = A.App(db, rpc, ks, health_parts=parts)
+    confirmed: list = []
+    app = A.App(db, rpc, ks, health_parts=parts, code_hash=HASH, on_confirmed=lambda o, v: confirmed.append((o, v)))
     s = A.serve(app, port=0)
+    rpc.confirmed = confirmed
     yield f"http://127.0.0.1:{s.server_address[1]}", db, rpc, ks, tmp_path
     s.shutdown()
 
@@ -71,6 +75,8 @@ def confirmed_setup(srv):
     rpc.state[VAULT] = {"owner_id": OWNER, "paused": False, "bot_key": pk, "version": "1"}
     rpc.access = {"nonce": 1, "permission": {"FunctionCall": {"allowance": str(10 ** 24), "receiver_id": VAULT,
                                                                "method_names": ["swap", "register_token"]}}}
+    # Mainnet: UseGlobalContract by hash -> code_hash all-ones, global_contract_hash set.
+    rpc.accounts[VAULT] = {"amount": "1", "code_hash": NO_CODE, "global_contract_hash": HASH}
     return pk
 
 
@@ -79,6 +85,58 @@ def test_vault_confirmed_ok(srv):
     confirmed_setup(srv)
     assert call(base, "/vault-confirmed", {"owner_id": OWNER, "vault_id": VAULT}) == (200, {"ok": True})
     assert db.execute("SELECT vault_id FROM users").fetchone()[0] == VAULT
+    assert srv[2].confirmed == [(OWNER, VAULT)]
+
+
+def test_vault_confirmed_accepts_deployed_code_with_pinned_hash(srv):
+    # Test wallets: DeployContract of the same wasm -> code_hash is the pinned hash.
+    base, rpc = srv[0], srv[2]
+    confirmed_setup(srv)
+    rpc.accounts[VAULT] = {"amount": "1", "code_hash": HASH}
+    assert call(base, "/vault-confirmed", {"owner_id": OWNER, "vault_id": VAULT}) == (200, {"ok": True})
+
+
+@pytest.mark.parametrize("acct", [
+    {"code_hash": NO_CODE, "global_contract_hash": "9" * 44},
+    {"code_hash": "9" * 44},
+    {"code_hash": NO_CODE},
+    {"code_hash": NO_CODE, "global_contract_account_id": "publisher.near"},  # by account: re-pointable
+])
+def test_vault_confirmed_rejects_other_code(srv, acct):
+    base, db, rpc = srv[0], srv[1], srv[2]
+    confirmed_setup(srv)
+    rpc.accounts[VAULT] = acct
+    c, r = call(base, "/vault-confirmed", {"owner_id": OWNER, "vault_id": VAULT})
+    assert (c, r) == (409, {"error": "vault code hash mismatch"})
+    assert db.execute("SELECT vault_id FROM users").fetchone()[0] is None
+    assert rpc.confirmed == []
+
+
+@pytest.mark.parametrize("methods", [["swap"], ["swap", "register_token", "sell"], [], ["swap", "swap"],
+                                     ["swap", "register_token", "register_token"]])
+def test_vault_confirmed_rejects_other_methods(srv, methods):
+    base, rpc = srv[0], srv[2]
+    confirmed_setup(srv)
+    rpc.access["permission"]["FunctionCall"]["method_names"] = methods
+    body = {"owner_id": OWNER, "vault_id": VAULT}
+    assert call(base, "/vault-confirmed", body) == (409, {"error": "bot key permission"})
+
+
+def test_vault_confirmed_without_pinned_hash_rejects(tmp_path):
+    db = connect(tmp_path / "t.db")
+    db.execute("INSERT INTO users (owner_id, created_at) VALUES (?, 0)", (OWNER,))
+    app = A.App(db, FakeRpc(), K.KeyStore(tmp_path), code_hash="")
+    app.bot_key({"owner_id": OWNER})
+    assert app.vault_confirmed({"owner_id": OWNER, "vault_id": VAULT}) == (503, {"error": "VAULT_CODE_HASH not set"})
+
+
+def test_vault_confirmed_hook_failure_still_confirms(srv, tmp_path):
+    base, db, rpc, ks, _ = srv
+    pk = confirmed_setup(srv)
+    def boom(o, v):
+        raise RuntimeError("rpc down")
+    app = A.App(db, rpc, ks, code_hash=HASH, on_confirmed=boom)
+    assert pk and app.vault_confirmed({"owner_id": OWNER, "vault_id": VAULT}) == (200, {"ok": True})
 
 
 def test_vault_confirmed_rejects(srv):

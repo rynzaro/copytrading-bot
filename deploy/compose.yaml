@@ -4,6 +4,8 @@ name: copytrade
 
 x-common-env: &common-env
   DATA_DIR: /data
+  # One SQLite file for both processes (docs/interfaces/worker-api.md "Shared DB file").
+  DB_PATH: /data/copytrade.db
   # Never pass an empty value: both apps would use "" instead of their default.
   NEAR_RPC_URL: ${NEAR_RPC_URL:-https://free.rpc.fastnear.com}
   WORKER_PORT: ${WORKER_PORT:-8700}
@@ -48,8 +50,6 @@ services:
       APP_HOST: ${APP_HOST:?set APP_HOST in .env}
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
       WORKER_URL: http://worker:${WORKER_PORT:-8700}
-      # One SQLite file for both processes (the worker opens $DATA_DIR/worker.db).
-      DB_PATH: /data/worker.db
       INSECURE_COOKIES: ${INSECURE_COOKIES:-}
     volumes:
       - ${DATA_DIR:-../data}:/data

@@ -26,6 +26,7 @@ class FakeRpc:
         self.meta: dict[str, int] = {}
         self.storage: dict[tuple[str, str], dict | None] = {}
         self.state: dict[str, dict] = {}
+        self.accounts: dict[str, dict] = {}  # view_account replies
         self.access: dict = {"nonce": 100, "permission": {"FunctionCall": {"allowance": str(10 ** 24),
                                                                          "receiver_id": "v", "method_names": []}}}
         self.sent: list[dict] = []
@@ -57,6 +58,12 @@ class FakeRpc:
         if method == "get_state":
             return self.state.get(account)
         raise RpcError(f"unknown view {account}.{method}")
+
+    def view_account(self, account):
+        self._maybe_down("view_account")
+        if account not in self.accounts:
+            raise RpcError(f"unknown account {account}")
+        return self.accounts[account]
 
     def view_access_key(self, account, public_key):
         self._maybe_down("view_access_key")
