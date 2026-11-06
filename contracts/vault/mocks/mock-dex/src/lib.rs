@@ -66,6 +66,22 @@ impl Dex {
         self.last_msg.clone()
     }
 
+    /// DCL-shaped `get_pool` for the worker's route reader (e2e). Any `x|y|fee` id is a running pool whose
+    /// spot price matches the 2:1 rate wNEAR -> other token (1.0001^6932 ~= 2). Ref v1 ids: null.
+    pub fn get_pool(&self, pool_id: serde_json::Value) -> serde_json::Value {
+        let Some(id) = pool_id.as_str() else { return serde_json::Value::Null };
+        let p: Vec<&str> = id.split('|').collect();
+        if p.len() != 3 {
+            return serde_json::Value::Null;
+        }
+        require!(self.rate_num == 2 * self.rate_den, "get_pool mock assumes rate 2:1");
+        // spot = raw y per raw x. wNEAR as y: 1 wNEAR buys 2 x, so spot 1/2 (point -6932).
+        let point: i32 = if p[1] == "wrap.near" { -6932 } else { 6932 };
+        let big = (10u128.pow(30)).to_string();
+        serde_json::json!({"pool_id": id, "token_x": p[0], "token_y": p[1], "fee": p[2].parse::<u32>().unwrap_or(0),
+            "current_point": point, "state": "Running", "total_x": big, "total_y": big})
+    }
+
     pub fn swaps(&self) -> u32 {
         self.swaps
     }

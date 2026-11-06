@@ -19,6 +19,7 @@ function schemaPath(): string | null {
 export function openDb(file: string, opts: { requireSchema?: boolean } = {}): DB {
   const db = new Database(/*turbopackIgnore: true*/ file)
   db.pragma('busy_timeout = 5000')
+  db.pragma('journal_mode = WAL') // worker opens the same file in WAL; ':memory:' stays 'memory'
   const sp = schemaPath()
   if (sp) db.exec(fs.readFileSync(/*turbopackIgnore: true*/ sp, 'utf8'))
   else if (opts.requireSchema) throw new Error('db.sql not found')
@@ -27,11 +28,16 @@ export function openDb(file: string, opts: { requireSchema?: boolean } = {}): DB
 
 let shared: DB | null = null
 
+const dataDir = () => process.env.DATA_DIR || path.resolve(process.cwd(), 'data')
+
+/** docs/interfaces/worker-api.md "Shared DB file": DB_PATH, else $DATA_DIR/copytrade.db (worker does the same). */
+export const dbPath = () => process.env.DB_PATH || path.join(dataDir(), 'copytrade.db')
+
 export function getDb(): DB {
   if (!shared) {
-    const dir = process.env.DATA_DIR ?? path.resolve(process.cwd(), 'data')
-    fs.mkdirSync(/*turbopackIgnore: true*/ dir, { recursive: true })
-    shared = openDb(process.env.DB_PATH ?? path.join(dir, 'copytrade.sqlite'))
+    const file = dbPath()
+    fs.mkdirSync(/*turbopackIgnore: true*/ path.dirname(file), { recursive: true })
+    shared = openDb(file)
   }
   return shared
 }
