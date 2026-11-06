@@ -13,7 +13,7 @@ from decimal import Decimal, getcontext
 from fractions import Fraction
 from typing import Any
 
-from .nearrpc import RpcError
+from .chain import RpcError
 from .types import Hop, MinOutInputs
 
 getcontext().prec = 60
@@ -105,9 +105,9 @@ def _ref_pool(d: dict, pool_id: str) -> Pool | None:
 def read_pool(rpc: Any, venue: str, pool_id: str) -> Pool | None:
     try:
         if venue == "dcl":
-            return _dcl_pool(rpc.view(DCL, "get_pool", {"pool_id": pool_id}), pool_id)
+            return _dcl_pool(rpc.call_view(DCL, "get_pool", {"pool_id": pool_id}), pool_id)
         if venue == "ref_v1":
-            return _ref_pool(rpc.view(REF_V1, "get_pool", {"pool_id": int(pool_id)}), pool_id)
+            return _ref_pool(rpc.call_view(REF_V1, "get_pool", {"pool_id": int(pool_id)}), pool_id)
     except (KeyError, TypeError, ValueError, RpcError):
         return None
     return None
@@ -136,7 +136,7 @@ def bridge_pool(rpc: Any, venue: str) -> Pool | None:
 
 
 def token_decimals(rpc: Any, token_id: str) -> int:
-    d = rpc.view(token_id, "ft_metadata", {})
+    d = rpc.call_view(token_id, "ft_metadata", {})
     dec = int(d["decimals"])
     if not 0 <= dec <= 32:
         raise NoRoute("bad decimals")

@@ -7,8 +7,8 @@ the executor only advances that row.
 
 Entry point (DRY_RUN=1 default: signs, never sends):
     DATA_DIR=/tmp/ctw python -m copytrade_worker
-Env: DATA_DIR, DRY_RUN, NEAR_RPC_URL, WORKER_PORT (API, default 8700), NTFY_URL, TELEGRAM_BOT_TOKEN, HOST_NTFY_TOPIC,
-HOST_TELEGRAM_CHAT_ID.
+Env: DATA_DIR, DRY_RUN, RPC_URLS (or NEAR_RPC_URL), VAULT_CODE_HASH, WORKER_PORT (API, default 8700), NTFY_URL,
+TELEGRAM_BOT_TOKEN, HOST_NTFY_TOPIC, HOST_TELEGRAM_CHAT_ID.
 """
 
 from __future__ import annotations
@@ -27,7 +27,6 @@ from .api import App, serve
 from .chain import Chain
 from .executor import Executor
 from .keys import KeyStore
-from .nearrpc import Rpc
 from .notify.config import Config as NotifyConfig
 from .notify.loop import Notifier
 from .signals import Pipeline
@@ -99,7 +98,7 @@ def data_dir() -> str:
 def run(
     path: str | None = None,
     chain: Chain | None = None,
-    rpc: Any = None,
+    rpc: Chain | None = None,
     api_port: int | None = None,
     notify_config: NotifyConfig | None = None,
     stop: threading.Event | None = None,
@@ -108,7 +107,7 @@ def run(
     data = data_dir()
     path = path or os.path.join(data, "worker.db")
     sig = start(db.connect(path), chain=chain, stop=stop)
-    rpc = rpc or Rpc()
+    rpc = rpc or Chain()  # own instance: executor latency not queued behind signal-side reads
     ks = KeyStore(data)
     ex = Executor(db.connect(path), rpc, ks)
     log("executor_start", dry_run=ex.dry_run)

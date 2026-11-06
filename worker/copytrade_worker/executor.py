@@ -22,8 +22,8 @@ from typing import Any
 from . import db as D
 from . import keys as K
 from . import route as R
+from .chain import RpcDown, RpcError
 from .db import now_ms
-from .nearrpc import RpcError
 from .types import Plan
 
 log = logging.getLogger("copytrade.executor")
@@ -65,6 +65,11 @@ def events(outcome: dict) -> list[dict]:
     return out
 
 
+def ambiguous_send_error(text: str) -> bool:
+    """send_tx error replies that don't prove the tx was rejected (it may still land)."""
+    return "TIMEOUT" in text.upper()
+
+
 def tx_failure(outcome: dict) -> str | None:
     st = outcome.get("status") or {}
     if "Failure" in st:
@@ -97,6 +102,11 @@ class Executor:
         self.db.execute(f"UPDATE copy_buys SET {sets} WHERE owner_id = ? AND token_id = ?",
                         (*cols.values(), plan.owner_id, plan.token_id))
 
+    def _status(self, plan: Plan) -> str | None:
+        r = self.db.execute("SELECT status FROM copy_buys WHERE owner_id = ? AND token_id = ?",
+                            (plan.owner_id, plan.token_id)).fetchone()
+        return r["status"] if r else None
+
     def claimed(self, plan: Plan) -> bool:
         """True when the (owner, token) row is 'planned' for this plan's signal (written by db.claim_copy_buy)."""
         row = self.db.execute("SELECT status, signal_id FROM copy_buys WHERE owner_id = ? AND token_id = ?",
@@ -115,7 +125,7 @@ class Executor:
         while True:
             try:
                 res = self.rpc.tx_status(tx.hash, sender)
-            except RpcError as e:
+            except (RpcError, RpcDown) as e:
                 log.warning("tx_status %s: %s", tx.hash, e)
                 res = None
             if res and (res.get("status") or {}).keys() & {"SuccessValue", "SuccessReceiptId", "Failure"}:
@@ -128,8 +138,12 @@ class Executor:
         tx = self._sign(key, plan, method, args, gas)
         try:
             self.rpc.send_tx(tx.base64)
+        except RpcDown:
+            return tx, None  # may have landed: caller treats as unknown, no resend
         except RpcError as e:
             t = e.text
+            if ambiguous_send_error(t):
+                return tx, None
             if "NotEnoughAllowance" in t:
                 raise Fail("gas_allowance") from None
             if "InvalidNonce" in t:
@@ -146,7 +160,7 @@ class Executor:
         try:
             ak = self.rpc.view_access_key(vault_id, public_key)
             allowance = ak["permission"]["FunctionCall"]["allowance"]
-        except (RpcError, KeyError, TypeError):
+        except (RpcError, RpcDown, KeyError, TypeError):
             return
         if allowance is None:
             return
@@ -164,7 +178,7 @@ class Executor:
     # ---- steps ----
     def ensure_registered(self, key: K.BotKey, plan: Plan) -> None:
         try:
-            bal = self.rpc.view(plan.token_id, "storage_balance_of", {"account_id": plan.vault_id})
+            bal = self.rpc.call_view(plan.token_id, "storage_balance_of", {"account_id": plan.vault_id})
         except RpcError:
             raise Fail("storage_check_failed") from None
         if bal is not None:
@@ -208,12 +222,17 @@ class Executor:
         self._update(plan, status="sent", min_out=str(mo), tx_hash=tx.hash)
         try:
             self.rpc.send_tx(tx.base64)
+            res = self._wait(tx, plan.vault_id)
+        except RpcDown:
+            res = None  # no endpoint answered the send: may have landed, never resend
         except RpcError as e:
             t = e.text
-            # Rejected by RPC: never on chain, safe to resend.
-            raise Fail("gas_allowance" if "NotEnoughAllowance" in t else "send_error",
-                       retry="NotEnoughAllowance" not in t) from None
-        res = self._wait(tx, plan.vault_id)
+            if ambiguous_send_error(t):
+                res = None
+            else:
+                # Rejected by RPC: never on chain, safe to resend.
+                raise Fail("gas_allowance" if "NotEnoughAllowance" in t else "send_error",
+                           retry="NotEnoughAllowance" not in t) from None
         self.check_gas(plan.owner_id, plan.vault_id, key.public_key)
         if res is None:
             log.warning("swap outcome unknown tx=%s owner=%s token=%s", tx.hash, plan.owner_id, plan.token_id)
@@ -266,6 +285,10 @@ class Executor:
             raise Fail(reason)
         except Fail as f:
             return self._fail(plan, f.reason, last_tx)
+        except RpcDown:
+            if self._status(plan) == "sent":
+                return "sent"  # a tx is out: leave it to the reconciler
+            return self._fail(plan, "rpc_down", last_tx)
         except (FileNotFoundError, ValueError):
             return self._fail(plan, "no_bot_key", last_tx)
 

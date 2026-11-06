@@ -6,6 +6,7 @@ import pytest
 from copytrade_worker import executor as X
 from copytrade_worker import keys as K
 from copytrade_worker import route as R
+from copytrade_worker.chain import RpcDown
 from copytrade_worker.db import claim_copy_buy, connect
 from copytrade_worker.types import Hop, MinOutInputs, Plan
 
@@ -159,9 +160,42 @@ def test_send_rejected_allowance_no_retry(env):
 
 def test_send_rejected_retried(env):
     db, rpc, ks, ex = env
-    rpc.send_errors = [{"name": "TIMEOUT"}]
+    rpc.send_errors = [{"name": "REQUEST_VALIDATION_ERROR"}]
     rpc.outcomes = [filled()]
     assert go(ex, plan()) == "filled"
+
+
+def test_send_timeout_reply_is_unknown_not_resent(env):
+    """A TIMEOUT reply to send_tx: the tx may be on its way. Never resend: stays 'sent' for the reconciler."""
+    db, rpc, ks, ex = env
+    rpc.send_errors = [{"name": "TIMEOUT_ERROR"}]
+    assert go(ex, plan()) == "sent"
+    assert rpc.sent == [] and row(db)["status"] == "sent" and row(db)["tx_hash"]
+    assert acts(db, "buy_failed") == []
+
+
+def test_send_rpc_down_is_unknown_not_resent(env):
+    db, rpc, ks, ex = env
+    rpc.send_errors = [RpcDown("send_tx")]
+    assert go(ex, plan()) == "sent"
+    assert row(db)["status"] == "sent" and acts(db, "buy_failed") == []
+    assert go(ex, plan(signal_id=2)) == "duplicate"
+
+
+def test_rpc_down_before_send_fails_row_for_reuse(env):
+    db, rpc, ks, ex = env
+    rpc.down = {"block_hash"}
+    assert go(ex, plan()) == "failed"
+    assert row(db)["reason"] == "rpc_down" and rpc.sent == []
+    rpc.down = set()
+    rpc.outcomes = [filled()]
+    assert go(ex, plan(signal_id=2)) == "filled"
+
+
+def test_rpc_down_while_waiting_is_unknown(env):
+    db, rpc, ks, ex = env
+    rpc.down = {"tx_status"}
+    assert go(ex, plan()) == "sent" and len(rpc.sent) == 1
 
 
 def test_gas_80_written_once_and_rearmed(env):
