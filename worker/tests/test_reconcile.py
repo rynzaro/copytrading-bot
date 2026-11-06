@@ -9,7 +9,7 @@ from copytrade_worker import keys as K
 from copytrade_worker.db import claim_copy_buy, connect
 from copytrade_worker.types import Hop, MinOutInputs, Plan
 
-from .fakes import FakeRpc, event, outcome
+from .fakes import FakeRpc, event, outcome, swap_error
 
 E24 = 10 ** 24
 MEME, OWNER, VAULT, TXH = "meme.near", "alice.near", "alice-vault.near", "TxHashSent1"
@@ -53,9 +53,15 @@ def test_sent_row_settled_filled_by_hash(env):
 
 
 @pytest.mark.parametrize("res,reason", [
-    (outcome(failure={"ActionError": {"kind": {"FunctionCallError": "x"}}}), "swap_failed"),
-    (outcome([event("swap_result", {"token_out": MEME, "error": "min_out"})]), "swap_failed"),
     (outcome(failure={"ActionError": "Smart contract panicked: paused"}), "paused"),
+    (outcome(failure={"ActionError": {"kind": {"FunctionCallError": "x"}}}), "swap_rejected"),
+    (swap_error("paused"), "paused"),
+    (swap_error("amount_in above balance"), "balance_low"),
+    (swap_error(f"vault not registered on {MEME}"), "not_registered"),
+    (swap_error("vault not registered on wrap.near"), "not_registered"),
+    (swap_error(f"ft_balance_of failed on {MEME}"), "balance_check_failed"),
+    (swap_error("ft_balance_of failed on wrap.near"), "balance_check_failed"),
+    (swap_error("swap failed, input refunded"), "swap_refunded"),
 ])
 def test_sent_row_settled_failed_and_reusable(env, res, reason):
     db, rpc, ex = env
@@ -69,10 +75,15 @@ def test_sent_row_settled_failed_and_reusable(env, res, reason):
     assert claim_copy_buy(db, p)   # a failed row is reused by a later signal
 
 
-@pytest.mark.parametrize("res", [None, outcome(), outcome([event("swap_result", {"amount_out": "junk"})]),
-                                 {"status": {}}])
+@pytest.mark.parametrize("res", [
+    None, outcome(), outcome([event("swap_result", {"amount_out": "junk"})]), {"status": {}},
+    swap_error("output balance unknown"), swap_error("min_out"), swap_error("paused", emitter=MEME),
+    outcome(failure={"ActionError": "x"}, failed_at="later"),
+    outcome(failure={"ActionError": "x"}, failed_at="later", failed_executor="wrap.near"),
+])
 def test_unknown_outcome_stays_sent(env, res):
-    """Not found yet, success without our event, junk amount: can't tell. Leave 'sent', token stays blocked."""
+    """Not found yet, success without our event, junk amount, input maybe spent (output balance unknown, later
+    receipt failed, forged event): can't tell. Leave 'sent', token stays blocked, never resent."""
     db, rpc, ex = env
     rpc.outcomes = [res]
     assert ex.reconcile() == 0

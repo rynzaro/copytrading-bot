@@ -45,6 +45,7 @@ def user(settings=None, **kw):
         (sig(), user(vault_id=None), "no_vault"),
         (sig(), user({}), "no_slippage"),
         (sig(), user({"slippage_bps": -1}), "no_slippage"),
+        (sig(), user({"slippage_bps": 0}), "no_slippage"),     # web rejects 0 too: minimum 1 bps
         (sig(), user({"slippage_bps": 1.5}), "no_slippage"),
         (sig(), user({"slippage_bps": True}), "no_slippage"),
         (sig(), user(target_enabled=False), "target_disabled"),
@@ -83,7 +84,7 @@ def test_default_ladder_bands(mcap, near):
 
 def test_custom_ladder_unsorted_and_fractional():
     st = {
-        "slippage_bps": 0,
+        "slippage_bps": 1,
         "ladder": [{"max_mcap_usd": 2e6, "size_near": "0.5"}, {"max_mcap_usd": 5e5, "size_near": 2}],
     }
     assert rules.plan(sig(mcap_usd=1e5), user(st)).amount_in == str(2 * 10**24)

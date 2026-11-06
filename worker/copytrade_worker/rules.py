@@ -109,7 +109,7 @@ def parse_slippage(x: Any) -> int | Literal["unlimited"] | None:
     if x == "unlimited":
         return "unlimited"
     n = _num(x)
-    if n is None or n < 0 or n != int(n):
+    if n is None or n < 1 or n != int(n):   # minimum 1 bps, same as web settings
         return None
     return int(n)
 
