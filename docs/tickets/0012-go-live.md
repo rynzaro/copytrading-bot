@@ -6,4 +6,5 @@ Each step needs the owner's explicit OK.
 2. Deploy one vault on a test owner wallet (normal deploy, ~1 NEAR locked + < 1 NEAR setup). Small deposit (amount set by owner).
 3. One live copy buy with a small ladder size. Verify: output in vault, activity, notifications, Sell and Withdraw from the web.
 4. Pause, unpause, remove bot key from the web.
+4b. Confirm 200 Tgas suffices on real DCL/Ref v1 buys. Test `owner_upgrade` (UseGlobalContract + `migrate`) on the test vault once a global contract exists.
 5. Only then: publish the global contract (~10 NEAR per 100 KB, burned) and open to other users.

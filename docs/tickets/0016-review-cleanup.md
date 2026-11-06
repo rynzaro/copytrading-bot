@@ -14,3 +14,5 @@ Not blocking. Judgement calls from the Standards review.
 ## Vault change batch (next contract version, with Q40 storage budget if approved)
 - Distinct `swap_result` errors for "ft_transfer_call failed" vs "venue used 0", so the worker needn't infer refunds from wrap.near receipts.
 - Vault state versioning: moved to 0019.
+- Worker accepts a list of allowed vault code hashes (`VAULT_CODE_HASHES`), so vaults stay confirmed across upgrades. Web: Upgrade button that uses `upgradeTx`.
+- Bump vault crate version when the state layout changes (0019 kept 2.0.0).
