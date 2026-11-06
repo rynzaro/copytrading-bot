@@ -52,7 +52,7 @@ The bot reaches four value-moving actions:
 
 - `near_deposit` to `wrap.near`: NEAR becomes the vault's own wNEAR. No value leaves the vault's balance sheet.
 - `ft_transfer_call` of wNEAR to a constant venue. The vault builds the message itself from `SwapArgs` (`rules::build_msg`). `SwapArgs` uses `deny_unknown_fields`, so a raw `msg` is refused at parse. Neither message shape has a recipient field (Ref v1's `swap_out_recipient` is never set), so both venues pay the output back to the sender, the vault. If the swap fails, `ft_transfer_call` refunds the input to the vault. Before sending, the vault checks that it is registered on the output token (and on wNEAR), so the venue's output `ft_transfer` can't fail and park tokens in a DEX internal balance or lost-and-found.
-- `storage_deposit` of at most 0.0125 NEAR: see residual risk 2.
+- `storage_deposit` of at most 0.0125 NEAR, and at most the storage budget per 24 h window (default 0.1 NEAR, owner sets it with `set_storage_budget`): see residual risk 2.
 - Gas: paid from the vault balance, limited by the key allowance (default 1 NEAR). Refunds go back to the allowance (measured, below).
 
 So a non-owner can change **what** the vault holds (wNEAR into meme tokens, within the swap rules), but can't send NEAR or tokens to any account other than the owner, wrap.near and the two venues, and the venues return the output to the vault.
@@ -68,6 +68,11 @@ So a non-owner can change **what** the vault holds (wNEAR into meme tokens, with
 - DCL pool id must be `<x>|<y>|<fee>` naming exactly the hop's two tokens; Ref v1 pool id a plain decimal u64.
 - `amount_in ≤ vault wNEAR + (NEAR − storage stake − 0.05 NEAR gas reserve)`. Async: the tx succeeds and `swap_result {error: "amount_in above balance"}` is logged, nothing is sent.
 - Vault registered on the output token and on wNEAR, else `swap_result {error}`, nothing sent. The worker should call `register_token` first.
+- After the send, `swap_result {error}` says where the input is: `"venue used 0"` = `ft_transfer_call` returned 0 used, all input refunded; `"ft_transfer_call failed"` = its result was unreadable (the transfer or its resolve failed), input location unknown; `"output balance unknown"` = the venue used input but the output balance read failed.
+
+## Storage budget
+
+`register_token` books each `storage_deposit` against `storage_budget` before sending it. Window: 24 h from the first payment after the previous window ended (`window_start`, block ns; 0 = none yet). Over budget: `register_token` panics `storage budget exceeded`, in the first receipt when the window is already used up, else in `on_register_checked` once the token's `min` is known. Nothing is paid. A failed `storage_deposit` (deposit refunded by the protocol) gives its amount back to the window it was booked in. A token that is already registered costs nothing. `set_storage_budget` takes effect at once, also for the current window; 0 stops all registrations. `get_state().storage_budget`: `{per_day, spent, window_start}`, `spent` is 0 once the window has ended.
 
 `denylist.json` is a copy of `worker/copytrade_worker/denylist.json` (ticket 0005; source copied from the Illia sniper). The unit test `denylist_matches_worker_copy` fails when the two differ, and skips while the worker file doesn't exist. The `config.json allow` override of the worker doesn't exist on chain.
 
@@ -103,14 +108,14 @@ Why: only the parent account can create `x.<owner>`, so the host can't create, p
 Flow, one transaction, signer = owner, receiver = `copytrade.<owner>`:
 
 1. `CreateAccount`
-2. `Transfer` setup NEAR plus trading funds (setup < 1 NEAR: storage stake of the small state, wNEAR registration; with a normal deploy add ~2.2 NEAR for the 213 KB code)
+2. `Transfer` setup NEAR plus trading funds (setup < 1 NEAR: storage stake of the small state, wNEAR registration; with a normal deploy add ~2.2 NEAR for the 218 KB code)
 3. `UseGlobalContract { code_hash }` (mainnet, after the global publish). Test wallets: `DeployContract { code }`.
 4. `FunctionCall new { owner_id: <owner> }`, 0 deposit, ~10 Tgas
 5. `FunctionCall set_bot_key { public_key: <from worker POST /bot-key>, allowance: "1000000000000000000000000" }`, 1 yocto, 50 Tgas
 
 No `AddKey` action. If any action fails the whole batch reverts. Then `POST /vault-confirmed`: the worker checks `get_state()` (owner, bot key), the key's permission (receiver vault, methods exactly `swap`, `register_token`) and the code (`global_contract_hash` or `code_hash` equals the pinned `VAULT_CODE_HASH`; a global contract by account id is refused). After that the bot calls `register_token("wrap.near")` (needed before the first buy: `near_deposit` on an unregistered account eats the storage fee from the amount; the vault refuses a buy until then).
 
-Setup costs (web `src/lib/vault-setup.ts`, from sandbox `setup_storage_and_gas`): the vault uses 357 bytes besides its code, so the transfer carries 0.01 NEAR storage (margin for the global contract hash), 0.00125 NEAR for the wNEAR registration and the 0.05 NEAR gas reserve: 0.06125 NEAR plus optional trading funds, plus gas.
+Setup costs (web `src/lib/vault-setup.ts`, from sandbox `setup_storage_and_gas`): the vault uses 397 bytes besides its code (v1: 357), so the transfer carries 0.01 NEAR storage (margin for the global contract hash), 0.00125 NEAR for the wNEAR registration and the 0.05 NEAR gas reserve: 0.06125 NEAR plus optional trading funds, plus gas.
 
 Refill gas allowance: owner calls `set_bot_key` again with the same key (delete + add in one batch).
 
@@ -121,7 +126,7 @@ Implicit owners (64-hex accounts): not supported by this flow. Account ids are a
 ## Residual risks
 
 1. **Bad trades by a malicious host.** The bot chooses token, pool and `min_out`. A host can create a meme token and a skewed pool on DCL or Ref v1 (or a skewed wNEAR/RHEA pool for the middle hop) and buy into it with the vault's NEAR. `min_out` protects an honest bot from slippage, not the owner from the bot. Bounded by the vault balance. Accepted in ADR 0002 (mcap and whale origin can't be checked on chain).
-2. **Storage-deposit drain.** `register_token` pays up to 0.0125 NEAR to any contract the bot names. A host-made token can claim it's unregistered every time and keep the deposit. Measured: a call burns ~11 Tgas, ~1 milliNEAR of allowance after refunds, so 1 NEAR of allowance allows ~1000 calls: up to ~12 NEAR (bounded by the balance). Smaller than risk 1 in the worst case, but needs no pool and no market. Mitigation not built (interface has no budget field): a registration budget refilled by the owner.
+2. **Storage-deposit drain.** `register_token` pays up to 0.0125 NEAR to any contract the bot names. A host-made token can claim it's unregistered every time and keep the deposit. Measured: a call burns ~11 Tgas, ~1 milliNEAR of allowance after refunds, so 1 NEAR of allowance allows ~1000 calls: up to ~12 NEAR (bounded by the balance). Smaller than risk 1 in the worst case, but needs no pool and no market. Mitigation (v2): the storage budget caps this at 0.1 NEAR per 24 h by default (owner-settable), so a malicious host drains at most ~0.1 NEAR a day until the owner removes the bot key.
 3. **Gas.** Up to the allowance (1 NEAR). Measured in sandbox (gas price 1e8, same as mainnet floor): a Ref v1 buy burns ~27 Tgas; the allowance drops ~0.017 NEAR at signing (200 Tgas prepaid at the pessimistic price) and ~0.0024 NEAR after refunds. A 300 Tgas transaction needs more than 1 NEAR allowance and is refused (`NotEnoughAllowance`), so the worker must send ≤ 200 Tgas. Sandbox test `gas_sizing` (mock DEX): every buy shape (DCL and Ref v1, 1 and 2 hops, with and without wrapping) needs at least 180 Tgas prepaid, because the vault reserves 150 Tgas for `on_swap_checked` (which passes 100 Tgas plus the unused gas to `ft_transfer_call`); each burns ~27 Tgas. `register_token` needs 40, burns ~11. The worker sends 200 and 50 (`SWAP_GAS_TGAS` / `REGISTER_GAS_TGAS`, clamped to 180–200 and 40–200). Buys can't have 3 hops: intermediates are only wNEAR or RHEA, the first token is wNEAR and tokens can't repeat. So the 1 NEAR allowance covers ~400 buys after refunds (~58 at the instant of signing, so at most that many in flight at once). Real venues burn more inside `ft_on_transfer` than the mock; the first mainnet test-wallet buy should confirm 200 Tgas from receipts.
 4. **Untrusted token contracts.** A meme token can lie in `ft_balance_of` / `storage_balance_of`, or refuse transfers. That only affects that token's own balance. `swap_result.amount_out` is the output balance difference and is best effort (a concurrent swap or a late output transfer skews it); the worker should confirm amounts from receipts.
 5. **Owner upgrade.** `owner_upgrade` switches to any hash the owner signs. A phishing page could ask for that signature. The web UI must show the expected hash.

@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import logging
 
@@ -14,6 +15,7 @@ from .fakes import FakeRpc, event, outcome, ref_pool, swap_error
 
 E24, E18 = 10 ** 24, 10 ** 18
 MEME, OWNER, VAULT = "meme.near", "alice.near", "alice-vault.near"
+OTHER = "other.near"
 
 
 @pytest.fixture
@@ -60,7 +62,7 @@ def swap_args(sent):
     return json.loads(raw[i + 4:i + 4 + n])
 
 
-REFUND = "swap failed, input refunded"
+REFUND = "venue used 0"
 
 
 def filled(amount="9000"):
@@ -97,6 +99,44 @@ def test_register_failure_marks_failed(env):
     rpc.outcomes = [outcome(failure={"ActionError": "x"})]
     assert go(ex, plan()) == "failed"
     assert row(db)["reason"] == "register_failed" and len(rpc.sent) == 1
+
+
+PANIC = "Smart contract panicked: storage budget exceeded"
+BUDGET_PANIC = {"ActionError": {"index": 0, "kind": {"FunctionCallError": {"ExecutionError": PANIC}}}}
+
+
+@pytest.mark.parametrize("failed_at", ["first", "later"])
+def test_storage_budget_skips_buy_and_tells_once_a_day(env, failed_at):
+    db, rpc, ks, ex = env
+    rpc.storage[(MEME, VAULT)] = None
+    rpc.outcomes = [outcome(failure=BUDGET_PANIC, failed_at=failed_at)]
+    assert go(ex, plan()) == "failed"
+    assert len(rpc.sent) == 1, "no swap sent"
+    r = row(db)
+    assert r["status"] == "failed" and r["reason"] == "storage_budget"
+    assert [k for k, _ in acts(db)] == ["system"]
+    assert "storage budget" in acts(db)[0][1]["text"]
+    # a second token the same day: skipped, no second notice
+    rpc.storage[(OTHER, VAULT)] = None
+    rpc.outcomes = [outcome(failure=BUDGET_PANIC, failed_at=failed_at)]
+    p2 = dataclasses.replace(plan(signal_id=2), token_id=OTHER)
+    assert go(ex, p2) == "failed"
+    assert [k for k, _ in acts(db)] == ["system"]
+    # a day later: told again
+    db.execute("UPDATE activity SET created_at = created_at - ?", (24 * 3600 * 1000 + 1,))
+    db.execute("UPDATE copy_buys SET status = 'failed'")
+    rpc.outcomes = [outcome(failure=BUDGET_PANIC, failed_at=failed_at)]
+    assert go(ex, plan()) == "failed"
+    assert [k for k, _ in acts(db)] == ["system", "system"]
+
+
+def test_budget_text_from_another_contract_is_not_budget(env):
+    """Only the vault's own panic counts: a token contract can write any text."""
+    db, rpc, ks, ex = env
+    rpc.storage[(MEME, VAULT)] = None
+    rpc.outcomes = [outcome(failure=BUDGET_PANIC, failed_at="later", failed_executor=MEME)]
+    assert go(ex, plan()) == "failed"
+    assert row(db)["reason"] == "register_failed"
 
 
 def test_retry_then_fill(env):

@@ -34,7 +34,7 @@ def test_every_vault_swap_error_is_classified_explicitly():
     ("vault not registered on wrap.near", "not_registered"),
     (f"ft_balance_of failed on {MEME}", "balance_check_failed"),
     ("ft_balance_of failed on wrap.near", "balance_check_failed"),
-    ("swap failed, input refunded", "swap_refunded"),
+    ("venue used 0", "swap_refunded"),
 ])
 def test_no_input_left_errors_are_failed(error, reason):
     assert cls(swap_error(error)) == ("failed", reason)
@@ -42,8 +42,7 @@ def test_no_input_left_errors_are_failed(error, reason):
 
 def test_refund_after_venue_panic_is_failed():
     """Venue's ft_on_transfer panicked (e.g. min_out): wrap.near refunds, vault says so."""
-    res = swap_error("swap failed, input refunded", failure={"ActionError": "x"}, failed_at="later",
-                     failed_executor=DCL)
+    res = swap_error("venue used 0", failure={"ActionError": "x"}, failed_at="later", failed_executor=DCL)
     assert cls(res) == ("failed", "swap_refunded")
 
 
@@ -52,8 +51,10 @@ def test_refund_after_venue_panic_is_failed():
     swap_error("min_out"),                                      # not a vault string
     swap_error("vault not registered on other.near"),           # not our token
     swap_error("paused", emitter=MEME),                         # forged by a token contract, not the vault
-    swap_error("swap failed, input refunded", failure={"ActionError": "x"}, failed_at="later",
-               failed_executor="wrap.near"),                    # wrap.near failed: refund (resolve) not proven
+    swap_error("ft_transfer_call failed"),                      # transfer or its resolve failed: input unknown
+    swap_error("ft_transfer_call failed", failure={"ActionError": "x"}, failed_at="later",
+               failed_executor="wrap.near"),
+    swap_error("swap failed, input refunded"),                  # v1 string: no longer proof
     outcome(failure={"ActionError": "x"}, failed_at="later"),   # later receipt failed, no verdict
     outcome(failure={"ActionError": "x"}, failed_at="later", failed_executor=DCL),
     outcome(),                                                  # success without our event
@@ -77,3 +78,9 @@ def test_filled():
 
 def test_retry_only_on_refund():
     assert X.RETRY_REASONS == {"swap_refunded"}
+
+
+def test_zero_used_is_proof_even_if_a_wrap_receipt_failed():
+    """'venue used 0' is ft_resolve_transfer's own answer: the refund happened, whatever else failed."""
+    res = swap_error("venue used 0", failure={"ActionError": "x"}, failed_at="later", failed_executor="wrap.near")
+    assert cls(res) == ("failed", "swap_refunded")

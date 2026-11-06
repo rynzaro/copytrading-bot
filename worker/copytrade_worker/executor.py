@@ -112,17 +112,19 @@ def is_final(res: dict | None) -> bool:
 
 
 # Vault `swap_result` errors that prove no input left the vault (contracts/vault/src/lib.rs on_swap_checked:
-# before any transfer; on_swap_sent: the venue used 0 and the input came back). Error -> reason code.
+# before any transfer; on_swap_sent "venue used 0": ft_resolve_transfer said none was used, all came back).
+# Error -> reason code.
 # `{token}` = the bought token or wrap.near. Any other error, or none, does not prove it.
 NO_INPUT_LEFT = {
     "paused": "paused",
     "vault not registered on {token}": "not_registered",
     "ft_balance_of failed on {token}": "balance_check_failed",
     "amount_in above balance": "balance_low",
-    "swap failed, input refunded": "swap_refunded",
+    "venue used 0": "swap_refunded",
 }
-# Vault errors emitted after the venue consumed the input: outcome unknown, never resent.
-INPUT_MAYBE_LEFT = {"output balance unknown"}
+# Vault errors that don't prove where the input is: outcome unknown, never resent. "ft_transfer_call failed":
+# the transfer or its resolve failed, so the vault couldn't read how much the venue used.
+INPUT_MAYBE_LEFT = {"output balance unknown", "ft_transfer_call failed"}
 # Failed reasons worth a resend (price may have moved back). The rest are deterministic.
 RETRY_REASONS = {"swap_refunded"}
 
@@ -177,10 +179,6 @@ def classify(res: dict, vault_id: str, token_id: str) -> tuple[str, str | None]:
         reason = _no_input_reason(last["error"], token_id)
         if reason is None:
             return "unknown", None
-        # "input refunded" is also what the vault says when ft_transfer_call's result was unreadable. If a
-        # wrap.near receipt failed (e.g. ft_resolve_transfer), the refund isn't proven.
-        if reason == "swap_refunded" and any(ex == R.WNEAR for _, ex, _ in fails):
-            return "unknown", None
         return "failed", reason
     # No verdict from the vault. Proven only if the vault call itself panicked: its promises never ran.
     first = _first_receipt(res)
@@ -188,6 +186,18 @@ def classify(res: dict, vault_id: str, token_id: str) -> tuple[str, str | None]:
         if first is not None and rid == first and ex == vault_id:
             return "failed", "paused" if "paused" in text.lower() else "swap_rejected"
     return "unknown", None  # success without our event, or a later receipt failed: can't tell
+
+
+# Vault panic in register_token / on_register_checked when the 24 h storage budget is used up (vault.md).
+STORAGE_BUDGET_PANIC = "storage budget exceeded"
+DAY_MS = 24 * 3600 * 1000
+BUDGET_TEXT = ("storage budget for today used up: buys of tokens the trading wallet can't hold yet are skipped "
+               "until the 24 h window resets or the owner raises the budget")
+
+
+def storage_budget_hit(res: dict, vault_id: str) -> bool:
+    """A receipt executed by the vault itself failed with the budget panic. Other contracts' text doesn't count."""
+    return any(ex == vault_id and STORAGE_BUDGET_PANIC in text for _, ex, text in _receipt_failures(res))
 
 
 class Executor:
@@ -303,10 +313,21 @@ class Executor:
         if res is None:
             raise Fail("register_unknown")
         if tx_failure(res):
+            if storage_budget_hit(res, plan.vault_id):
+                self._budget_notice(plan.owner_id)
+                raise Fail("storage_budget")
             raise Fail("register_failed")
         dep = next((e.get("deposit") for e in events(res, plan.vault_id) if e.get("event") == "token_registered"), None)
         if dep is not None:
             self._activity(plan.owner_id, "storage_paid", {"token_id": plan.token_id, "amount": str(int(dep))})
+
+    def _budget_notice(self, owner_id: str) -> None:
+        """One `system` row per user per 24 h: storage budget used up, buys of new tokens skipped."""
+        seen = self.db.execute(
+            "SELECT 1 FROM activity WHERE owner_id = ? AND kind = 'system' AND json_extract(payload, '$.text') = ?"
+            " AND created_at > ? LIMIT 1", (owner_id, BUDGET_TEXT, now_ms() - DAY_MS)).fetchone()
+        if not seen:
+            self._activity(owner_id, "system", {"text": BUDGET_TEXT})
 
     def _swap_once(self, key: K.BotKey, plan: Plan) -> str:
         """One attempt. Returns final status 'filled' | 'sent' (unknown) | 'dry_run'. Raises Fail."""
@@ -391,6 +412,10 @@ class Executor:
                         break
             raise Fail(reason)
         except Fail as f:
+            if f.reason == "storage_budget":
+                # Skip, not a failure notice per token: the user got the daily `system` row.
+                self._update(plan, status="failed", reason=f.reason)
+                return "failed"
             return self._fail(plan, f.reason, last_tx)
         except RpcDown:
             if self._status(plan) == "sent":
