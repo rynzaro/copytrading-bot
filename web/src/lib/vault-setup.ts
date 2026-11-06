@@ -10,7 +10,7 @@ export const GAS_ALLOWANCE_YOCTO = nearToYocto('1')
 
 /**
  * What the setup transfer pays for. Measured in the 0004 sandbox (tests/sandbox.rs `setup_storage_and_gas`):
- * the vault uses 397 bytes besides its code (state + bot key); global contract by hash adds the 32-byte hash.
+ * the vault uses 398 bytes besides its code (state + bot key); global contract by hash adds the 32-byte hash.
  * Storage costs 1e19 yocto per byte, so ~0.004 NEAR; we send 0.01 for margin.
  */
 export const SETUP_COSTS = {

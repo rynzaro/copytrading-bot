@@ -2,11 +2,12 @@
 //! Rhea DCL or Ref v1) and `register_token`. Only the owner moves funds out.
 //! Interface: docs/interfaces/vault.md. Security argument: README.md.
 
+use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::json_types::{Base58CryptoHash, U128, U64};
 use near_sdk::serde_json::{self, Value};
 use near_sdk::{
-    env, ext_contract, near, require, AccountId, Allowance, CryptoHash, Gas, NearToken, PanicOnDefault, Promise,
-    PromiseOrValue, PublicKey,
+    env, ext_contract, near, near_bindgen, require, AccountId, Allowance, CryptoHash, Gas, GasWeight, NearToken,
+    PanicOnDefault, Promise, PromiseOrValue, PublicKey,
 };
 
 mod rules;
@@ -20,6 +21,8 @@ const GAS_FT_TRANSFER: Gas = Gas::from_tgas(15);
 const GAS_STORAGE_DEPOSIT: Gas = Gas::from_tgas(10);
 const GAS_FT_TRANSFER_CALL: Gas = Gas::from_tgas(100);
 const GAS_AFTER_SEND: Gas = Gas::from_tgas(25);
+/// Static gas for `migrate` in the upgrade batch; it also gets all unused gas.
+const GAS_MIGRATE: Gas = Gas::from_tgas(20);
 /// Most a single `register_token` may pay (interface: 0.0125 NEAR).
 pub const MAX_STORAGE_DEPOSIT: NearToken = NearToken::from_micronear(12_500);
 /// Default most `register_token` may pay per window (interface: 0.1 NEAR per 24 h).
@@ -137,13 +140,53 @@ impl StorageBudget {
     }
 }
 
-#[near(contract_state)]
-#[derive(PanicOnDefault)]
-pub struct Vault {
+/// State layout 2. Frozen: never change a stored layout. A new layout is a new struct and a new
+/// `VersionedState` variant, plus a conversion from every older one (README "Upgrades").
+#[near(serializers = [borsh])]
+#[derive(Debug, Clone, PartialEq)]
+pub struct StateV2 {
     owner_id: AccountId,
     paused: bool,
     bot_key: Option<PublicKey>,
     storage_budget: StorageBudget,
+}
+
+/// What is stored under `STATE`: a Borsh enum tag, then the layout. Variants are only appended,
+/// never changed, removed or reordered, so every version loads every older state.
+#[near(serializers = [borsh])]
+#[derive(Debug, Clone, PartialEq)]
+pub enum VersionedState {
+    V2(StateV2),
+}
+
+impl VersionedState {
+    /// The current layout, converted from whichever version was stored.
+    fn into_current(self) -> StateV2 {
+        match self {
+            VersionedState::V2(s) => s,
+        }
+    }
+}
+
+/// Stored as `VersionedState` (manual Borsh below); in memory always the current layout.
+#[near_bindgen(contract_state)]
+#[derive(PanicOnDefault)]
+pub struct Vault {
+    s: StateV2,
+}
+
+impl BorshSerialize for Vault {
+    fn serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        // Same bytes as VersionedState::V2(self.s), without the clone.
+        BorshSerialize::serialize(&0u8, w)?;
+        BorshSerialize::serialize(&self.s, w)
+    }
+}
+
+impl BorshDeserialize for Vault {
+    fn deserialize_reader<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self { s: VersionedState::deserialize_reader(r)?.into_current() })
+    }
 }
 
 fn me() -> AccountId {
@@ -191,7 +234,7 @@ impl Vault {
     pub fn new(owner_id: AccountId) -> Self {
         require!(env::predecessor_account_id() == owner_id, "new: caller must be owner_id");
         require!(owner_id != me(), "new: owner can't be the vault");
-        Self { owner_id, paused: false, bot_key: None, storage_budget: StorageBudget::new() }
+        Self { s: StateV2 { owner_id, paused: false, bot_key: None, storage_budget: StorageBudget::new() } }
     }
 
     // ---------------- bot ----------------
@@ -207,7 +250,7 @@ impl Vault {
     /// storage budget. Fails here when the window's budget is used up, else in the callback.
     pub fn register_token(&mut self, token_id: AccountId) -> Promise {
         self.assert_bot();
-        let b = &self.storage_budget;
+        let b = &self.s.storage_budget;
         require!(b.spent_now(env::block_timestamp()) < b.per_day, BUDGET_EXCEEDED);
         ext_ft::ext(token_id.clone())
             .with_static_gas(GAS_VIEW)
@@ -259,14 +302,14 @@ impl Vault {
     #[payable]
     pub fn pause(&mut self) {
         self.assert_owner();
-        self.paused = true;
+        self.s.paused = true;
         VaultEvent::Paused.emit();
     }
 
     #[payable]
     pub fn unpause(&mut self) {
         self.assert_owner();
-        self.paused = false;
+        self.s.paused = false;
         VaultEvent::Unpaused.emit();
     }
 
@@ -279,7 +322,7 @@ impl Vault {
         let allow = Allowance::limited(NearToken::from_yoctonear(allowance.0))
             .unwrap_or_else(|| env::panic_str("allowance must be > 0"));
         let mut p = Promise::new(me());
-        if let Some(old) = self.bot_key.take() {
+        if let Some(old) = self.s.bot_key.take() {
             p = p.delete_key(old);
         }
         p.add_access_key_allowance(public_key.clone(), allow, me(), BOT_METHODS)
@@ -290,7 +333,7 @@ impl Vault {
     #[payable]
     pub fn remove_bot_key(&mut self) -> Promise {
         self.assert_owner();
-        let old = self.bot_key.take().unwrap_or_else(|| env::panic_str("no bot key"));
+        let old = self.s.bot_key.take().unwrap_or_else(|| env::panic_str("no bot key"));
         VaultEvent::BotKeyRemoved.emit();
         Promise::new(me()).delete_key(old)
     }
@@ -300,27 +343,43 @@ impl Vault {
     #[payable]
     pub fn set_storage_budget(&mut self, per_day: U128) {
         self.assert_owner();
-        self.storage_budget.per_day = per_day.0;
+        self.s.storage_budget.per_day = per_day.0;
     }
 
-    /// Switch this account to the global contract with `code_hash`. State is kept.
+    /// Switch this account to the global contract with `code_hash`, then run the new code's `migrate`
+    /// in the same receipt. If the new code has no `migrate` or can't load this state, the whole
+    /// receipt reverts and the old code stays, so a bad upgrade can't lock the funds.
     #[payable]
     pub fn owner_upgrade(&mut self, code_hash: Base58CryptoHash) -> Promise {
         self.assert_owner();
         let h: CryptoHash = code_hash.into();
-        Promise::new(me()).use_global_contract(h)
+        Promise::new(me()).use_global_contract(h).function_call_weight(
+            "migrate".to_string(),
+            b"{}".to_vec(),
+            NearToken::from_yoctonear(0),
+            GAS_MIGRATE,
+            GasWeight(1),
+        )
+    }
+
+    /// Load the stored state in any older layout and store it in the current one. Called only by
+    /// `owner_upgrade`'s batch on this account (the bot key can't name this method).
+    #[private]
+    #[init(ignore_state)]
+    pub fn migrate() -> Self {
+        env::state_read::<Self>().unwrap_or_else(|| env::panic_str("migrate: no state"))
     }
 
     pub fn get_state(&self) -> VaultState {
         VaultState {
-            owner_id: self.owner_id.clone(),
-            paused: self.paused,
-            bot_key: self.bot_key.as_ref().map(String::from),
+            owner_id: self.s.owner_id.clone(),
+            paused: self.s.paused,
+            bot_key: self.s.bot_key.as_ref().map(String::from),
             version: VERSION.to_string(),
             storage_budget: StorageBudgetView {
-                per_day: U128(self.storage_budget.per_day),
-                spent: U128(self.storage_budget.spent_now(env::block_timestamp())),
-                window_start: U64(self.storage_budget.window_start),
+                per_day: U128(self.s.storage_budget.per_day),
+                spent: U128(self.s.storage_budget.spent_now(env::block_timestamp())),
+                window_start: U64(self.s.storage_budget.window_start),
             },
         }
     }
@@ -332,7 +391,7 @@ impl Vault {
     #[private]
     pub fn on_swap_checked(&mut self, args: SwapArgs, buy: bool) -> PromiseOrValue<bool> {
         let out = args.token_out().clone();
-        if buy && self.paused {
+        if buy && self.s.paused {
             return swap_failed(&out, "paused".into());
         }
         if !result_registered(0) {
@@ -411,7 +470,7 @@ impl Vault {
     /// Results: [0] storage_balance_of(vault), [1] storage_balance_bounds.
     #[private]
     pub fn on_register_checked(&mut self, token_id: AccountId) -> PromiseOrValue<bool> {
-        require!(!self.paused, "paused");
+        require!(!self.s.paused, "paused");
         if result_registered(0) {
             return PromiseOrValue::Value(false);
         }
@@ -423,8 +482,8 @@ impl Vault {
         require!(min <= MAX_STORAGE_DEPOSIT.as_yoctonear(), "storage deposit above 0.0125 NEAR");
         require!(min <= spendable(SWAP_GAS_RESERVE), "storage deposit above balance");
         let now = env::block_timestamp();
-        self.storage_budget.spend(min, now);
-        let window = self.storage_budget.window_start;
+        self.s.storage_budget.spend(min, now);
+        let window = self.s.storage_budget.window_start;
         PromiseOrValue::Promise(
             ext_ft::ext(token_id.clone())
                 .with_static_gas(GAS_STORAGE_DEPOSIT)
@@ -438,7 +497,7 @@ impl Vault {
     pub fn on_registered(&mut self, token_id: AccountId, deposit: U128, window: U64) -> bool {
         if result_bytes(0).is_none() {
             // A failed storage_deposit refunds its deposit to us.
-            self.storage_budget.refund(deposit.0, window.0);
+            self.s.storage_budget.refund(deposit.0, window.0);
             return false;
         }
         VaultEvent::TokenRegistered { token_id, deposit }.emit();
@@ -495,7 +554,7 @@ impl Vault {
         if result_bytes(0).is_none() {
             return false;
         }
-        self.bot_key = Some(public_key.clone());
+        self.s.bot_key = Some(public_key.clone());
         VaultEvent::BotKeySet { public_key, allowance }.emit();
         true
     }
@@ -506,13 +565,13 @@ impl Vault {
     /// it to swap/register_token with zero deposit; this also blocks any stale key.
     fn assert_bot(&self) {
         require!(env::predecessor_account_id() == me(), "only the bot key");
-        require!(self.bot_key.as_ref() == Some(&env::signer_account_pk()), "only the bot key");
-        require!(!self.paused, "paused");
+        require!(self.s.bot_key.as_ref() == Some(&env::signer_account_pk()), "only the bot key");
+        require!(!self.s.paused, "paused");
     }
 
     /// Owner = predecessor is owner_id and exactly 1 yocto attached, so a full-access key signed it.
     fn assert_owner(&self) {
-        require!(env::predecessor_account_id() == self.owner_id, "only the owner");
+        require!(env::predecessor_account_id() == self.s.owner_id, "only the owner");
         require!(env::attached_deposit() == NearToken::from_yoctonear(1), "attach exactly 1 yoctoNEAR");
     }
 
@@ -542,7 +601,7 @@ impl Vault {
     }
 
     fn send_near(&self, amount: u128) -> bool {
-        Promise::new(self.owner_id.clone()).transfer(NearToken::from_yoctonear(amount)).detach();
+        Promise::new(self.s.owner_id.clone()).transfer(NearToken::from_yoctonear(amount)).detach();
         VaultEvent::Withdraw { token_id: "near".into(), amount: U128(amount) }.emit();
         true
     }
@@ -551,7 +610,7 @@ impl Vault {
         ext_ft::ext(token_id.clone())
             .with_static_gas(GAS_FT_TRANSFER)
             .with_attached_deposit(NearToken::from_yoctonear(1))
-            .ft_transfer(self.owner_id.clone(), U128(amount), None)
+            .ft_transfer(self.s.owner_id.clone(), U128(amount), None)
             .then(Self::ext(me()).with_static_gas(Gas::from_tgas(5)).on_token_sent(token_id, U128(amount)))
     }
 }

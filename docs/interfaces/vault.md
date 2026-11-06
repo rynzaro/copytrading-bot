@@ -38,8 +38,13 @@ The vault builds the DEX message itself from `SwapArgs`. Callers never pass raw 
 | `pause()` / `unpause()` | owner | 1 yocto | paused: `swap` and `register_token` panic |
 | `set_bot_key(public_key, allowance: U128)` | owner | 1 yocto | delete old bot key if any, add FC key as above |
 | `remove_bot_key()` | owner | 1 yocto | delete bot key |
-| `owner_upgrade(code_hash: Base58)` | owner | 1 yocto | switch to global contract by hash |
+| `owner_upgrade(code_hash: Base58)` | owner | 1 yocto | one batch receipt on the vault: `UseGlobalContract(code_hash)`, then `migrate()` of the new code. If `migrate` is missing or panics, the receipt reverts and the old code stays. Owner tx: this one call, ≥ 100 Tgas. |
+| `migrate()` | vault itself (`#[private]`, `#[init(ignore_state)]`) | 0 | loads the stored state in any older layout and writes it back in the current one. Only reached from the `owner_upgrade` batch (not in the bot key's methods). |
 | `get_state()` | view | – | `{ owner_id, paused, bot_key: string?, version, storage_budget: {per_day, spent, window_start} }` |
+
+## State layout
+
+Stored state (`STATE` key) is Borsh `VersionedState`, an enum with one variant per layout (`V2(StateV2)` first). Variants are never changed, removed or reordered; a new layout appends a variant. Every version must load every older variant, so `migrate` works from any older version. Downgrades are refused (old code can't read the newer tag, so its `migrate` panics, or it has none).
 
 ## Swap rules (enforced on chain)
 

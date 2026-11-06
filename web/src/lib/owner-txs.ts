@@ -1,4 +1,5 @@
 // Owner-signed vault calls (docs/interfaces/vault.md). Each attaches 1 yocto.
+import bs58 from 'bs58'
 import { ONE_YOCTO, WRAP } from './near'
 import type { Slippage } from './settings'
 import { call, type PlannedTx } from './tx'
@@ -24,6 +25,18 @@ export const withdrawTokenTx = (vault: string, token_id: string, amount: string 
 export const pauseTx = (vault: string, paused: boolean) => tx(vault, paused ? 'Pause' : 'Resume', paused ? 'pause' : 'unpause', {})
 export const setBotKeyTx = (vault: string, public_key: string, allowance: string) =>
   tx(vault, 'Refill bot key', 'set_bot_key', { public_key, allowance })
+/** Switch the vault to the global contract `codeHash`. The vault runs the new code's `migrate` in the same
+ * receipt; if that fails, the switch reverts (contracts/vault/README.md "Upgrades"). Show the hash to the user. */
+export function upgradeTx(vault: string, codeHash: string): PlannedTx {
+  let raw: Uint8Array
+  try {
+    raw = bs58.decode(codeHash)
+  } catch {
+    throw new Error('code hash must be base58')
+  }
+  if (raw.length !== 32 || bs58.encode(raw) !== codeHash) throw new Error('code hash must be 32 bytes, base58')
+  return tx(vault, 'Upgrade vault code', 'owner_upgrade', { code_hash: codeHash }, 100)
+}
 export const depositTx = (vault: string, yocto: string): PlannedTx => ({
   receiver_id: vault,
   label: 'Deposit',

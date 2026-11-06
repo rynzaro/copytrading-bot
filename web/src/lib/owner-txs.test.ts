@@ -2,7 +2,7 @@
 // contracts/vault/tests/fixtures/web_plans.json, are signed against the real vault in the sandbox e2e
 // (contracts/vault/tests/e2e.rs). Update the fixture with `pnpm vitest run -u`.
 import { describe, expect, it } from 'vitest'
-import { depositTx, pauseTx, removeBotKeyTx, sellTx, setBotKeyTx, withdrawNearTx, withdrawTokenTx } from './owner-txs'
+import { depositTx, pauseTx, removeBotKeyTx, sellTx, setBotKeyTx, upgradeTx, withdrawNearTx, withdrawTokenTx } from './owner-txs'
 import { buildSetupPlan, GAS_ALLOWANCE_YOCTO } from './vault-setup'
 import { nearToYocto, WRAP } from './near'
 import { gas, type PlannedTx } from './tx'
@@ -59,8 +59,14 @@ describe('owner action tx shapes', () => {
     )
     expect(one(removeBotKeyTx(V))).toEqual(fc('remove_bot_key', {}, 50))
   })
+  it('upgrade: one owner_upgrade call; the vault itself runs migrate in the same receipt', () => {
+    expect(one(upgradeTx(V, HASH))).toEqual(fc('owner_upgrade', { code_hash: HASH }, 100))
+  })
+  it('upgrade refuses a malformed code hash', () => {
+    for (const h of ['', 'abc', '0'.repeat(44), HASH + '2', 'ed25519:' + HASH]) expect(() => upgradeTx(V, h)).toThrow()
+  })
   it('every owner call attaches exactly 1 yocto and at most 300 Tgas', () => {
-    for (const t of [sellTx(V, sellArgs), withdrawNearTx(V, null), withdrawTokenTx(V, MEME), pauseTx(V, true), setBotKeyTx(V, KEY, '1'), removeBotKeyTx(V)]) {
+    for (const t of [upgradeTx(V, HASH), sellTx(V, sellArgs), withdrawNearTx(V, null), withdrawTokenTx(V, MEME), pauseTx(V, true), setBotKeyTx(V, KEY, '1'), removeBotKeyTx(V)]) {
       const a = one(t)
       expect(a).toMatchObject({ kind: 'function_call', deposit: '1' })
       if (a.kind === 'function_call') expect(BigInt(a.gas)).toBeLessThanOrEqual(BigInt(gas(300)))

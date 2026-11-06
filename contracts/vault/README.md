@@ -14,7 +14,7 @@ The argument has three parts: who can call what, which actions the contract can 
 |---|---|---|
 | Owner | `predecessor == owner_id` and exactly 1 yoctoNEAR attached (`assert_owner`) | `sell`, `withdraw_near`, `withdraw_token`, `pause`, `unpause`, `set_bot_key`, `remove_bot_key`, `owner_upgrade` |
 | Bot | `predecessor == vault` and `signer_account_pk == stored bot_key` (`assert_bot`), not paused | `swap`, `register_token` |
-| Vault itself (callbacks) | `#[private]`: `predecessor == vault` | `on_*` |
+| Vault itself (callbacks, upgrade batch) | `#[private]`: `predecessor == vault` | `on_*`, `migrate` |
 | Anyone else | nothing | `get_state` (view) |
 
 Why the bot can't pass the owner check: the bot key is a function-call key **on the vault account**, so its predecessor is the vault, never `owner_id` (`new` refuses `owner_id == vault`).
@@ -41,7 +41,7 @@ This is the complete list of outgoing promises in `src/lib.rs`. There is no othe
 | `storage_deposit` | `token_id`; `account_id = vault`, `registration_only = true` | ≤ 0.0125 NEAR | `register_token` (bot) |
 | `AddKey` FC | vault | – | `set_bot_key` (owner); methods fixed to `swap,register_token`, receiver fixed to vault |
 | `DeleteKey` | vault | – | `set_bot_key`, `remove_bot_key` (owner) |
-| `UseGlobalContract` (by hash) | vault | – | `owner_upgrade` (owner) |
+| `UseGlobalContract` (by hash) + `migrate` call, one receipt | vault | – | `owner_upgrade` (owner) |
 | views: `ft_balance_of`, `storage_balance_of`, `storage_balance_bounds` | any token | no deposit | swap, register, withdraw |
 
 Not in the code: DeleteAccount, full-access AddKey, DeployContract, Stake, any function call with a caller-chosen method name or receiver, any caller-supplied `msg`.
@@ -115,7 +115,7 @@ Flow, one transaction, signer = owner, receiver = `copytrade.<owner>`:
 
 No `AddKey` action. If any action fails the whole batch reverts. Then `POST /vault-confirmed`: the worker checks `get_state()` (owner, bot key), the key's permission (receiver vault, methods exactly `swap`, `register_token`) and the code (`global_contract_hash` or `code_hash` equals the pinned `VAULT_CODE_HASH`; a global contract by account id is refused). After that the bot calls `register_token("wrap.near")` (needed before the first buy: `near_deposit` on an unregistered account eats the storage fee from the amount; the vault refuses a buy until then).
 
-Setup costs (web `src/lib/vault-setup.ts`, from sandbox `setup_storage_and_gas`): the vault uses 397 bytes besides its code (v1: 357), so the transfer carries 0.01 NEAR storage (margin for the global contract hash), 0.00125 NEAR for the wNEAR registration and the 0.05 NEAR gas reserve: 0.06125 NEAR plus optional trading funds, plus gas.
+Setup costs (web `src/lib/vault-setup.ts`, from sandbox `setup_storage_and_gas`): the vault uses 398 bytes besides its code (v1: 357; the state version tag adds 1), so the transfer carries 0.01 NEAR storage (margin for the global contract hash), 0.00125 NEAR for the wNEAR registration and the 0.05 NEAR gas reserve: 0.06125 NEAR plus optional trading funds, plus gas.
 
 Refill gas allowance: owner calls `set_bot_key` again with the same key (delete + add in one batch).
 
@@ -123,13 +123,35 @@ The sandbox test `setup()` runs exactly this batch (with DeployContract) and `se
 
 Implicit owners (64-hex accounts): not supported by this flow. Account ids are at most 64 characters, so `x.<64 hex>` can't exist. Options, none built: require a named owner account; NEP-616 deterministic accounts (near-sdk 5.30 `state_init`, account id derived from code hash + initial state, so no init race; mainnet availability not checked); the `near` linkdrop `create_account_advanced` (has an init race, not recommended). Eth-implicit (`0x…`) owners: same length problem.
 
+## Upgrades
+
+Stored state (`STATE` key) is Borsh `VersionedState` (`src/lib.rs`): an enum tag, then the layout of that version. Today one variant, `V2(StateV2)` (tag 0). `Vault` keeps the current layout in memory and reads and writes it through the enum, so a version can always tell which layout it is reading.
+
+**Safety rule: a new version must always load every older state.** For a layout change:
+
+1. Add a new frozen struct (`StateV3`) and append a variant (`V3(StateV3)`). Never change, remove or reorder an existing variant or struct: their bytes are on chain.
+2. `into_current` converts every older variant to the new layout. The Borsh impl of `Vault` writes the new tag.
+3. Add a unit test that decodes a blob of every older version with the new code (pattern: `v2_state_blob_loads_with_v3_code`, a test-only V3).
+4. Keep `migrate` (same name, no arguments). Without it, `owner_upgrade` to the new code fails by design.
+
+`owner_upgrade(code_hash)` sends one batch receipt to the vault itself: `UseGlobalContract(code_hash)`, then `FunctionCall migrate {}` (20 Tgas plus all unused gas). `migrate` (`#[private]`, `#[init(ignore_state)]`) runs the new code: it loads the stored state through `VersionedState` and writes it back in the new layout. Actions of one receipt succeed or revert together, so if the new code has no `migrate`, or can't read the stored tag, the code switch reverts and the old code keeps running: funds can't get stuck behind an unreadable state. A downgrade is refused the same way (old code can't read a newer tag; v1 and earlier v2 builds have no `migrate`).
+
+Procedure (owner, after the new code is published as a global contract and its hash checked against the reproducible build):
+
+1. Optional: `pause`, so no bot buy runs across the switch.
+2. Sign the web's upgrade action (`upgradeTx` in `web/src/lib/owner-txs.ts`): one `owner_upgrade {code_hash}` call, 1 yocto, 100 Tgas.
+3. Check `get_state().version` is the new version and the rest of the state unchanged. Then `unpause`.
+4. Update the worker's pinned `VAULT_CODE_HASH`, or `POST /vault-confirmed` refuses the vault.
+
+Tests: unit tests `state_is_stored_as_versioned_v2`, `v2_state_blob_loads_with_v3_code`, `migrate_*`, `owner_upgrade_switches_code_and_migrates_in_one_receipt` (receipt shape); sandbox `upgrade_batch_migrates_or_reverts` runs the batch with DeployContract in place of UseGlobalContract (same receipt semantics): same code keeps the state, code without `migrate` reverts and the vault code stays. Not tested: the real `UseGlobalContract` action (near-workspaces 0.24 can't publish or reference global contracts); confirm on a test wallet before go-live.
+
 ## Residual risks
 
 1. **Bad trades by a malicious host.** The bot chooses token, pool and `min_out`. A host can create a meme token and a skewed pool on DCL or Ref v1 (or a skewed wNEAR/RHEA pool for the middle hop) and buy into it with the vault's NEAR. `min_out` protects an honest bot from slippage, not the owner from the bot. Bounded by the vault balance. Accepted in ADR 0002 (mcap and whale origin can't be checked on chain).
 2. **Storage-deposit drain.** `register_token` pays up to 0.0125 NEAR to any contract the bot names. A host-made token can claim it's unregistered every time and keep the deposit. Measured: a call burns ~11 Tgas, ~1 milliNEAR of allowance after refunds, so 1 NEAR of allowance allows ~1000 calls: up to ~12 NEAR (bounded by the balance). Smaller than risk 1 in the worst case, but needs no pool and no market. Mitigation (v2): the storage budget caps this at 0.1 NEAR per 24 h by default (owner-settable), so a malicious host drains at most ~0.1 NEAR a day until the owner removes the bot key.
 3. **Gas.** Up to the allowance (1 NEAR). Measured in sandbox (gas price 1e8, same as mainnet floor): a Ref v1 buy burns ~27 Tgas; the allowance drops ~0.017 NEAR at signing (200 Tgas prepaid at the pessimistic price) and ~0.0024 NEAR after refunds. A 300 Tgas transaction needs more than 1 NEAR allowance and is refused (`NotEnoughAllowance`), so the worker must send ≤ 200 Tgas. Sandbox test `gas_sizing` (mock DEX): every buy shape (DCL and Ref v1, 1 and 2 hops, with and without wrapping) needs at least 180 Tgas prepaid, because the vault reserves 150 Tgas for `on_swap_checked` (which passes 100 Tgas plus the unused gas to `ft_transfer_call`); each burns ~27 Tgas. `register_token` needs 40, burns ~11. The worker sends 200 and 50 (`SWAP_GAS_TGAS` / `REGISTER_GAS_TGAS`, clamped to 180–200 and 40–200). Buys can't have 3 hops: intermediates are only wNEAR or RHEA, the first token is wNEAR and tokens can't repeat. So the 1 NEAR allowance covers ~400 buys after refunds (~58 at the instant of signing, so at most that many in flight at once). Real venues burn more inside `ft_on_transfer` than the mock; the first mainnet test-wallet buy should confirm 200 Tgas from receipts.
 4. **Untrusted token contracts.** A meme token can lie in `ft_balance_of` / `storage_balance_of`, or refuse transfers. That only affects that token's own balance. `swap_result.amount_out` is the output balance difference and is best effort (a concurrent swap or a late output transfer skews it); the worker should confirm amounts from receipts.
-5. **Owner upgrade.** `owner_upgrade` switches to any hash the owner signs. A phishing page could ask for that signature. The web UI must show the expected hash.
+5. **Owner upgrade.** `owner_upgrade` switches to any hash the owner signs, as long as that code has a `migrate` that loads this state (see "Upgrades"). A phishing page could ask for that signature, and hostile code can export a `migrate`. The web UI must show the expected hash.
 6. **Normal-deploy test wallets** lock ~2.2 NEAR of storage stake for the code; the contract has no delete-account path, so it stays locked (mainnet global contract: ~0).
 
 ## Build and test
@@ -148,4 +170,4 @@ cargo clippy --all-targets --workspace
 cargo near build reproducible-wasm   # Docker, from a clean committed tree; the hash to publish
 ```
 
-Sandbox setup: mock token (`mocks/mock-ft`, wrap-like) at `wrap.near`, `token.rhealab.near`, `meme.near`, `usdt.tether-token.near`; mock DEX (`mocks/mock-dex`) at `dclv2.ref-labs.near` and `v2.ref-finance.near`, placed by state patch so the vault's constants are tested as built. The mock DEX pays 2 out per 1 in, back to the sender by detached `ft_transfer`, and keeps no user balances. The e2e (`tests/e2e.rs`, skipped unless `CTB_E2E=1`) signs the web's planned owner transactions from `tests/fixtures/web_plans.json` (written by `web/src/lib/owner-txs.test.ts`; refresh with `pnpm vitest run -u`): setup, deposit, pause, unpause, refill, sell, withdraw token, withdraw NEAR, remove bot key, withdraw all. In between, the worker (`worker/scripts/e2e_sandbox.py`, real API and executor, DRY_RUN off) confirms the vault via `POST /vault-confirmed` (pinned code hash = sha256 of the built wasm), registers it on wNEAR, and buys `meme.near` through the mock DEX. For the worker's route reader the mocks answer `get_pool` (DCL shape, 2:1) and `ft_metadata`. Not tested in sandbox: `owner_upgrade` (near-workspaces 0.24 can't build `UseGlobalContract`; unit-tested for access only).
+Sandbox setup: mock token (`mocks/mock-ft`, wrap-like) at `wrap.near`, `token.rhealab.near`, `meme.near`, `usdt.tether-token.near`; mock DEX (`mocks/mock-dex`) at `dclv2.ref-labs.near` and `v2.ref-finance.near`, placed by state patch so the vault's constants are tested as built. The mock DEX pays 2 out per 1 in, back to the sender by detached `ft_transfer`, and keeps no user balances. The e2e (`tests/e2e.rs`, skipped unless `CTB_E2E=1`) signs the web's planned owner transactions from `tests/fixtures/web_plans.json` (written by `web/src/lib/owner-txs.test.ts`; refresh with `pnpm vitest run -u`): setup, deposit, pause, unpause, refill, sell, withdraw token, withdraw NEAR, remove bot key, withdraw all. In between, the worker (`worker/scripts/e2e_sandbox.py`, real API and executor, DRY_RUN off) confirms the vault via `POST /vault-confirmed` (pinned code hash = sha256 of the built wasm), registers it on wNEAR, and buys `meme.near` through the mock DEX. For the worker's route reader the mocks answer `get_pool` (DCL shape, 2:1) and `ft_metadata`. Not tested in sandbox: `owner_upgrade` itself (near-workspaces 0.24 can't build `UseGlobalContract`; unit-tested for access and receipt shape, the batch semantics in `upgrade_batch_migrates_or_reverts`).

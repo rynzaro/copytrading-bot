@@ -31,7 +31,7 @@ fn ctx(predecessor: &str, signer_pk: &str, deposit: u128) {
 fn vault() -> Vault {
     ctx(OWNER, OTHER_PK, 0);
     let mut v = Vault::new(acc(OWNER));
-    v.bot_key = Some(pk(BOT_PK));
+    v.s.bot_key = Some(pk(BOT_PK));
     v
 }
 
@@ -605,4 +605,129 @@ fn swap_result_distinguishes_transfer_failure_from_zero_used() {
     assert_eq!(sent_error(PromiseResult::Failed), "ft_transfer_call failed");
     assert_eq!(sent_error(ok("junk")), "ft_transfer_call failed");
     assert_eq!(sent_error(ok(r#""0""#)), "venue used 0");
+}
+
+// ---------------- state versioning (README "Upgrades") ----------------
+
+fn stored(v: &Vault) -> Vec<u8> {
+    near_sdk::borsh::to_vec(v).unwrap()
+}
+
+#[test]
+fn state_is_stored_as_versioned_v2() {
+    let v = vault();
+    let bytes = stored(&v);
+    assert_eq!(bytes, near_sdk::borsh::to_vec(&VersionedState::V2(v.s.clone())).unwrap());
+    assert_eq!(bytes[0], 0, "V2 is tag 0");
+    let back = Vault::try_from_slice(&bytes).unwrap();
+    assert_eq!(back.s, v.s);
+}
+
+/// Test-only "V3 code": a new layout appended as a new variant, as README "Upgrades" prescribes.
+mod v3 {
+    use super::*;
+    use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
+
+    #[derive(BorshSerialize, BorshDeserialize, Debug, PartialEq)]
+    #[borsh(crate = "near_sdk::borsh")]
+    pub struct StateV3 {
+        pub owner_id: AccountId,
+        pub paused: bool,
+        pub bot_key: Option<PublicKey>,
+        pub storage_budget: StorageBudget,
+        pub max_buy: u128,
+    }
+
+    #[derive(BorshSerialize, BorshDeserialize, Debug, PartialEq)]
+    #[borsh(crate = "near_sdk::borsh")]
+    pub enum VersionedStateV3 {
+        V2(StateV2),
+        V3(StateV3),
+    }
+
+    impl VersionedStateV3 {
+        pub fn into_current(self) -> StateV3 {
+            match self {
+                Self::V2(s) => StateV3 {
+                    owner_id: s.owner_id,
+                    paused: s.paused,
+                    bot_key: s.bot_key,
+                    storage_budget: s.storage_budget,
+                    max_buy: u128::MAX,
+                },
+                Self::V3(s) => s,
+            }
+        }
+    }
+}
+
+#[test]
+fn v2_state_blob_loads_with_v3_code() {
+    let mut v = vault();
+    ctx(OWNER, OTHER_PK, 1);
+    v.pause();
+    v.set_storage_budget(U128(42));
+    let blob = stored(&v);
+
+    let s3 = v3::VersionedStateV3::try_from_slice(&blob).unwrap().into_current();
+    assert_eq!(s3.owner_id, acc(OWNER));
+    assert!(s3.paused);
+    assert_eq!(s3.bot_key, Some(pk(BOT_PK)));
+    assert_eq!(s3.storage_budget, v.s.storage_budget);
+    assert_eq!(s3.max_buy, u128::MAX);
+
+    // V3 code writes tag 1; V2 code (this build) refuses it instead of misreading it.
+    let v3_blob = near_sdk::borsh::to_vec(&v3::VersionedStateV3::V3(s3)).unwrap();
+    assert_eq!(v3_blob[0], 1);
+    assert!(Vault::try_from_slice(&v3_blob).is_err(), "downgrade must fail to load");
+}
+
+#[test]
+fn migrate_reloads_and_keeps_state() {
+    let mut v = vault();
+    ctx(OWNER, OTHER_PK, 1);
+    v.set_storage_budget(U128(7));
+    let before = v.get_state();
+    env::state_write(&v);
+    ctx(VAULT, OTHER_PK, 0);
+    let m = Vault::migrate();
+    assert_eq!(m.get_state(), before);
+    assert_eq!(stored(&m), stored(&v));
+}
+
+#[test]
+#[should_panic(expected = "migrate: no state")]
+fn migrate_without_state_panics() {
+    ctx(VAULT, OTHER_PK, 0);
+    Vault::migrate();
+}
+
+#[test]
+#[should_panic(expected = "Cannot deserialize")]
+fn migrate_unknown_layout_panics() {
+    ctx(VAULT, OTHER_PK, 0);
+    env::storage_write(b"STATE", &[9, 1, 2, 3]);
+    Vault::migrate();
+}
+
+#[test]
+fn owner_upgrade_switches_code_and_migrates_in_one_receipt() {
+    use near_sdk::mock::MockAction;
+    let mut v = vault();
+    ctx(OWNER, OTHER_PK, 1);
+    v.owner_upgrade(Base58CryptoHash::from([7u8; 32]));
+    let receipts = near_sdk::test_utils::get_created_receipts();
+    assert_eq!(receipts.len(), 1, "one receipt: both actions revert together");
+    let r = &receipts[0];
+    assert_eq!(r.receiver_id, acc(VAULT));
+    assert_eq!(r.actions.len(), 2);
+    assert!(matches!(r.actions[0], MockAction::UseGlobalContract { .. }), "{:?}", r.actions[0]);
+    match &r.actions[1] {
+        MockAction::FunctionCallWeight { method_name, args, attached_deposit, .. } => {
+            assert_eq!(method_name, b"migrate");
+            assert_eq!(args, b"{}");
+            assert_eq!(attached_deposit.as_yoctonear(), 0);
+        }
+        a => panic!("expected migrate call, got {a:?}"),
+    }
 }

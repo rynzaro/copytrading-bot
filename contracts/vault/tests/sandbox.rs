@@ -417,6 +417,7 @@ async fn bot_key_limited_to_swap_and_register() -> anyhow::Result<()> {
         ("set_bot_key", json!({"public_key": SecretKey::from_random(KeyType::ED25519).public_key(), "allowance": "1"})),
         ("remove_bot_key", json!({})),
         ("owner_upgrade", json!({"code_hash": "11111111111111111111111111111111"})),
+        ("migrate", json!({})),
         ("on_unwrapped", json!({"want": "1"})),
         ("on_withdraw_token_balance", json!({"token_id": MEME})),
         (
@@ -489,6 +490,7 @@ async fn stranger_can_not_move_funds() -> anyhow::Result<()> {
         ("set_bot_key", json!({"public_key": e.mallory.secret_key().public_key(), "allowance": "1"})),
         ("remove_bot_key", json!({})),
         ("owner_upgrade", json!({"code_hash": "11111111111111111111111111111111"})),
+        ("migrate", json!({})),
         ("on_unwrapped", json!({"want": near(5).to_string()})),
         ("on_withdraw_near_balance", json!({"amount": null})),
         ("on_withdraw_token_balance", json!({"token_id": MEME})),
@@ -504,6 +506,49 @@ async fn stranger_can_not_move_funds() -> anyhow::Result<()> {
     assert_eq!(ft_bal(&e.worker, MEME, &e.vault).await, 1000);
     assert!(near_bal(&e.worker, &e.vault).await >= n0);
     assert_eq!(e.state().await["bot_key"], e.bot_sk.public_key().to_string());
+    Ok(())
+}
+
+// ---------------- upgrade ----------------
+
+/// The `owner_upgrade` batch shape (code switch + `migrate` in one receipt), with DeployContract standing in
+/// for UseGlobalContract (near-workspaces can't build it). The vault here has a full-access key so the test
+/// can send the batch itself; real vaults reach it only through `owner_upgrade`.
+#[tokio::test]
+async fn upgrade_batch_migrates_or_reverts() -> anyhow::Result<()> {
+    use near_workspaces::operations::Function;
+    let worker = near_workspaces::sandbox().await?;
+    let root = worker.root_account()?;
+    let owner =
+        root.create_subaccount("alice").initial_balance(NearToken::from_near(20)).transact().await?.into_result()?;
+    let v = root.create_subaccount("v").initial_balance(NearToken::from_near(20)).transact().await?.into_result()?;
+    v.deploy(&wasm("vault")).await?.into_result()?;
+    owner.call(v.id(), "new").args_json(json!({"owner_id": owner.id()})).transact().await?.into_result()?;
+    owner.call(v.id(), "pause").deposit(ONE_YOCTO).transact().await?.into_result()?;
+    owner
+        .call(v.id(), "set_storage_budget")
+        .args_json(json!({"per_day": "42"}))
+        .deposit(ONE_YOCTO)
+        .transact()
+        .await?
+        .into_result()?;
+    let state = || async { view::<Value>(&worker, v.id().as_str(), "get_state", json!({})).await };
+    let before = state().await;
+
+    // Only the vault itself may run migrate.
+    let r = owner.call(v.id(), "migrate").transact().await?;
+    assert!(r.is_failure(), "owner called migrate directly");
+
+    // Same code + migrate: state kept.
+    v.batch(v.id()).deploy(&wasm("vault")).call(Function::new("migrate")).transact().await?.into_result()?;
+    assert_eq!(state().await, before);
+
+    // Code without migrate (here the mock token): the whole receipt reverts, the vault code stays.
+    let r = v.batch(v.id()).deploy(&wasm("mock_ft")).call(Function::new("migrate")).transact().await?;
+    assert!(r.is_failure(), "upgrade to code without migrate must fail");
+    assert_eq!(state().await, before, "old code and state still load");
+    let code = worker.view_code(v.id()).await?;
+    assert_eq!(code, wasm("vault"));
     Ok(())
 }
 
