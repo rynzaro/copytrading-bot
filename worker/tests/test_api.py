@@ -125,3 +125,20 @@ def test_port_from_worker_port_env(monkeypatch):
     assert A.api_port() == 8700
     monkeypatch.setenv("WORKER_PORT", "9123")
     assert A.api_port() == 9123
+
+
+def test_host_from_worker_host_env(monkeypatch):
+    # Default stays loopback; Compose sets WORKER_HOST=0.0.0.0 on its internal network (deploy/compose.yaml).
+    monkeypatch.delenv("WORKER_HOST", raising=False)
+    assert A.api_host() == "127.0.0.1"
+    monkeypatch.setenv("WORKER_HOST", "0.0.0.0")
+    assert A.api_host() == "0.0.0.0"
+
+
+def test_serve_binds_api_host(monkeypatch, tmp_path):
+    monkeypatch.delenv("WORKER_HOST", raising=False)
+    s = A.serve(A.App(connect(tmp_path / "t.db"), FakeRpc(), K.KeyStore(tmp_path)), port=0)
+    try:
+        assert s.server_address[0] == "127.0.0.1"
+    finally:
+        s.shutdown()

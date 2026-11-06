@@ -1,0 +1,83 @@
+# Copytrading bot: web + worker + Caddy. Run from this directory: `docker compose up -d`.
+# Values come from ./.env (see .env.example). DRY_RUN defaults to 1: the worker signs but never sends.
+name: copytrade
+
+x-common-env: &common-env
+  DATA_DIR: /data
+  # Never pass an empty value: both apps would use "" instead of their default.
+  NEAR_RPC_URL: ${NEAR_RPC_URL:-https://free.rpc.fastnear.com}
+  WORKER_PORT: ${WORKER_PORT:-8700}
+
+services:
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/worker.Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      # API on the internal `backend` network (web only). Never published to the host.
+      WORKER_HOST: 0.0.0.0
+      RPC_URLS: ${NEAR_RPC_URLS:-}
+      VAULT_CODE_HASH: ${VAULT_CODE_HASH:-}
+      DRY_RUN: ${DRY_RUN:-1}
+      NTFY_URL: ${NTFY_URL:-}
+      HOST_NTFY_TOPIC: ${HOST_NTFY_TOPIC:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      HOST_TELEGRAM_CHAT_ID: ${HOST_TELEGRAM_CHAT_ID:-}
+    volumes:
+      - ${DATA_DIR:-../data}:/data
+    # backend: web <-> worker API only (internal, no route out). egress: worker's own way out (feeds, RPC).
+    networks: [backend, egress]
+    logging: &logging
+      driver: json-file
+      options: {max-size: "10m", max-file: "5"}
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/web.Dockerfile
+      args:
+        NEXT_PUBLIC_VAULT_CODE_HASH: ${NEXT_PUBLIC_VAULT_CODE_HASH:-${VAULT_CODE_HASH:-}}
+    restart: unless-stopped
+    depends_on: [worker]
+    # edge: Caddy -> web:3000, and web's way out (RPC). backend: web -> worker API.
+    networks: [edge, backend]
+    environment:
+      <<: *common-env
+      APP_HOST: ${APP_HOST:?set APP_HOST in .env}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      WORKER_URL: http://worker:${WORKER_PORT:-8700}
+      # One SQLite file for both processes (the worker opens $DATA_DIR/worker.db).
+      DB_PATH: /data/worker.db
+      INSECURE_COOKIES: ${INSECURE_COOKIES:-}
+    volumes:
+      - ${DATA_DIR:-../data}:/data
+    logging: *logging
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [web]
+    environment:
+      APP_HOST: ${APP_HOST:?set APP_HOST in .env}
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [edge]
+    logging: *logging
+
+networks:
+  edge: {}
+  egress: {}
+  backend:
+    internal: true
+
+volumes:
+  caddy_data: {}
+  caddy_config: {}

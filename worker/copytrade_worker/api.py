@@ -129,9 +129,15 @@ def api_port() -> int:
     return int(os.environ.get("WORKER_PORT") or DEFAULT_PORT)
 
 
-def serve(app: App, port: int | None = None, host: str = "127.0.0.1") -> ThreadingHTTPServer:
-    """Start in a daemon thread, bound to 127.0.0.1."""
+def api_host() -> str:
+    """127.0.0.1 unless WORKER_HOST is set. Compose sets 0.0.0.0: the container sits on an internal network only."""
+    return os.environ.get("WORKER_HOST") or "127.0.0.1"
+
+
+def serve(app: App, port: int | None = None, host: str | None = None) -> ThreadingHTTPServer:
+    """Start in a daemon thread, bound to api_host() (default 127.0.0.1)."""
     port = api_port() if port is None else port
+    host = api_host() if host is None else host
     srv = ThreadingHTTPServer((host, port), handler(app))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
