@@ -1,6 +1,6 @@
 # Interface: worker internal HTTP
 
-Bound to 127.0.0.1 only (Compose: internal network). Web (0007) calls it. No auth beyond network isolation in v1.
+Bound to 127.0.0.1 only, port from env `WORKER_PORT` (default 8700; web reads `WORKER_URL`, default `http://127.0.0.1:8700`) (Compose: internal network). Web (0007) calls it. No auth beyond network isolation in v1.
 
 | Route | Body | Reply |
 |---|---|---|
