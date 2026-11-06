@@ -22,6 +22,6 @@
 
 ## Build
 - Next.js + React (Catalyst kit, Tailwind v4; look inspired by Uniswap and Beak tokens). Python worker for feed and signing (port from Illia sniper `tp/illia/`, `launches.py`). SQLite. Docker Compose (also the self-host path).
-- Vault: Rust near-sdk, near-workspaces sandbox tests, then mainnet test wallets with normal deploy. Global contract publish (~21 NEAR for the 213 KB wasm, burned) only at launch, after approval.
+- Vault: Rust near-sdk, near-workspaces sandbox tests, then mainnet test wallets with normal deploy. Global contract publish (~22 NEAR for the 218 KB wasm, burned) only at launch, after approval.
 - Separate VPS, not the Beak host. VPS and domain chosen at deploy.
 - Repo: public `rynzaro/copytrading-bot`, MIT; Catalyst files under `src/components/catalyst/`, excluded via `LICENSE-CATALYST.md`.
