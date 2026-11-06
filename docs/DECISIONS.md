@@ -3,7 +3,8 @@
 ## Product
 - NEAR mainnet, real funds. Disclaimer before first use, dismissible per browser, always in footer.
 - Copy meme buys only (non-meme denylist). Copy targets: curated list (root.near, seriousfarmer.near only) plus free entry.
-- Signals: swaps and filled DCL limit orders. Feed: Intear teardata optimistic tail, Intear WS backup.
+- Signals: executed swaps only (fill-only detection). DCL limit buy orders by a copy target: notify users who copy that target when the order is placed; never buy on them.
+- Owners need a named account in v1 (no factory; implicit accounts get a clear message). Feed: Intear teardata optimistic tail, Intear WS backup.
 - Quote token wNEAR. Venues: Rhea DCL and Ref v1, multi-hop via RHEA allowed. No Intear (ticket 0002), no bonding curves.
 - Size ladder by mcap: < $1M S1 (10 NEAR), $1–3M S2 (5 NEAR), > $3M skip, unknown skip. No other spend limits.
 - One copy buy per token per user, ever. No ordering between users.
@@ -15,7 +16,7 @@
 - Login: Wallet Selector v10 (Meteor, MyNearWallet, HOT, Intear wallet), NEP-413 session. Created wallet allowed, with warning.
 
 ## Custody (ADR 0001, 0002)
-- Per-user vault, global contract pinned by hash. Bot key calls `vault.swap` only. Owner-only withdraw, pause, sell, code change. No expiry, no caps.
+- Per-user vault, global contract pinned by hash. Bot key calls `vault.swap` and `vault.register_token` (storage budget 0.1 NEAR per 24 h, owner-settable). Owner-only withdraw, pause, sell, code change. No expiry, no caps.
 - Gas allowance 1 NEAR, refill by owner.
 - Setup costs (< 1 NEAR) paid by user, shown before signing.
 
