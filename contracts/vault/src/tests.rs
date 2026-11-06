@@ -1,7 +1,7 @@
 #![allow(unused_must_use)]
 use super::*;
 use near_sdk::test_utils::{get_logs, VMContextBuilder};
-use near_sdk::{testing_env, NearToken};
+use near_sdk::{testing_env, NearToken, PromiseResult};
 
 const VAULT: &str = "bot.alice.near";
 const OWNER: &str = "alice.near";
@@ -258,7 +258,7 @@ fn state_after_new() {
     assert_eq!(s.owner_id, acc(OWNER));
     assert!(!s.paused);
     assert_eq!(s.bot_key.as_deref(), Some(BOT_PK));
-    assert_eq!(s.version, "1.0.0");
+    assert_eq!(s.version, "2.0.0");
 }
 
 #[test]
@@ -367,6 +367,7 @@ fn owner_methods_reject_non_owner() {
         ("remove_bot_key", |v| {
             v.remove_bot_key();
         }),
+        ("set_storage_budget", |v| v.set_storage_budget(U128(5))),
         ("owner_upgrade", |v| {
             v.owner_upgrade(Base58CryptoHash::from([7u8; 32]));
         }),
@@ -440,4 +441,168 @@ fn unwrap_callback_private() {
     let mut v = vault();
     ctx(OWNER, OTHER_PK, 0);
     v.on_unwrapped(U128(1));
+}
+
+// ---------------- storage budget ----------------
+
+const MILLI: u128 = 10u128.pow(21);
+const T0: u64 = 1_700_000_000_000_000_000;
+
+/// Callback context at `ts` with the given promise results.
+fn cb(ts: u64, results: Vec<PromiseResult>) {
+    testing_env!(
+        VMContextBuilder::new()
+            .current_account_id(acc(VAULT))
+            .predecessor_account_id(acc(VAULT))
+            .signer_account_id(acc(VAULT))
+            .signer_account_pk(pk(BOT_PK))
+            .account_balance(NearToken::from_near(20))
+            .block_timestamp(ts)
+            .build(),
+        near_sdk::test_vm_config(),
+        near_sdk::RuntimeFeesConfig::test(),
+        Default::default(),
+        results,
+    );
+}
+
+fn ok(b: &str) -> PromiseResult {
+    PromiseResult::Successful(b.as_bytes().to_vec())
+}
+
+/// on_register_checked for an unregistered token whose storage min is `min`.
+fn register_cb(v: &mut Vault, ts: u64, min: u128) {
+    cb(ts, vec![ok("null"), ok(&format!(r#"{{"min":"{min}","max":null}}"#))]);
+    v.on_register_checked(acc(MEME));
+}
+
+fn budget(v: &Vault) -> StorageBudgetView {
+    v.get_state().storage_budget
+}
+
+#[test]
+fn storage_budget_default() {
+    let v = vault();
+    let b = budget(&v);
+    assert_eq!(b.per_day.0, DEFAULT_STORAGE_BUDGET.as_yoctonear());
+    assert_eq!(b.per_day.0, 100 * MILLI);
+    assert_eq!((b.spent.0, b.window_start.0), (0, 0));
+}
+
+#[test]
+fn register_counts_against_budget() {
+    let mut v = vault();
+    register_cb(&mut v, T0, 10 * MILLI);
+    let b = budget(&v);
+    assert_eq!((b.spent.0, b.window_start.0), (10 * MILLI, T0));
+    register_cb(&mut v, T0 + 1, 12 * MILLI);
+    assert_eq!(budget(&v).spent.0, 22 * MILLI);
+    assert_eq!(budget(&v).window_start.0, T0, "window starts at its first payment");
+}
+
+#[test]
+fn register_up_to_budget_exactly() {
+    let mut v = vault();
+    for i in 0..10 {
+        register_cb(&mut v, T0 + i, 10 * MILLI);
+    }
+    assert_eq!(budget(&v).spent.0, 100 * MILLI);
+}
+
+#[test]
+#[should_panic(expected = "storage budget exceeded")]
+fn register_over_budget_panics() {
+    let mut v = vault();
+    for i in 0..9 {
+        register_cb(&mut v, T0 + i, 10 * MILLI);
+    }
+    register_cb(&mut v, T0 + 10, 11 * MILLI);
+}
+
+#[test]
+fn budget_window_resets_after_24h() {
+    let mut v = vault();
+    for i in 0..10 {
+        register_cb(&mut v, T0 + i, 10 * MILLI);
+    }
+    let later = T0 + STORAGE_WINDOW_NS - 1;
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| register_cb(&mut v, later, MILLI)));
+    assert!(r.is_err(), "still the same window");
+    let mut v = vault();
+    for i in 0..10 {
+        register_cb(&mut v, T0 + i, 10 * MILLI);
+    }
+    register_cb(&mut v, T0 + STORAGE_WINDOW_NS, 5 * MILLI);
+    let b = budget(&v);
+    assert_eq!((b.spent.0, b.window_start.0), (5 * MILLI, T0 + STORAGE_WINDOW_NS));
+}
+
+#[test]
+fn view_shows_zero_spent_after_window() {
+    let mut v = vault();
+    register_cb(&mut v, T0, 10 * MILLI);
+    cb(T0 + STORAGE_WINDOW_NS, vec![]);
+    assert_eq!(budget(&v).spent.0, 0);
+}
+
+#[test]
+fn failed_storage_deposit_gives_budget_back() {
+    let mut v = vault();
+    register_cb(&mut v, T0, 10 * MILLI);
+    cb(T0 + 1, vec![PromiseResult::Failed]);
+    assert!(!v.on_registered(acc(MEME), U128(10 * MILLI), near_sdk::json_types::U64(T0)));
+    assert_eq!(budget(&v).spent.0, 0);
+}
+
+#[test]
+fn already_registered_spends_nothing() {
+    let mut v = vault();
+    cb(T0, vec![ok(r#"{"total":"1","available":"0"}"#), ok(r#"{"min":"5","max":null}"#)]);
+    v.on_register_checked(acc(MEME));
+    assert_eq!(budget(&v).spent.0, 0);
+}
+
+#[test]
+#[should_panic(expected = "storage budget exceeded")]
+fn register_token_panics_early_when_budget_used_up() {
+    let mut v = vault();
+    for i in 0..10 {
+        register_cb(&mut v, T0 + i, 10 * MILLI);
+    }
+    cb(T0 + 20, vec![]);
+    v.register_token(acc(MEME));
+}
+
+#[test]
+fn owner_sets_budget() {
+    let mut v = vault();
+    ctx(OWNER, OTHER_PK, 1);
+    v.set_storage_budget(U128(3 * MILLI));
+    assert_eq!(budget(&v).per_day.0, 3 * MILLI);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| register_cb(&mut v, T0, 4 * MILLI)));
+    assert!(r.is_err());
+    let mut v = vault();
+    ctx(OWNER, OTHER_PK, 1);
+    v.set_storage_budget(U128(0));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| register_cb(&mut v, T0, 1)));
+    assert!(r.is_err(), "0 = no registrations");
+}
+
+// ---------------- swap_result errors ----------------
+
+fn sent_error(r: PromiseResult) -> Value {
+    let mut v = vault();
+    cb(T0, vec![r]);
+    v.on_swap_sent(acc(MEME), U128(0));
+    let logs = get_logs();
+    let e: Value = serde_json::from_str(&logs.last().unwrap()["EVENT_JSON:".len()..]).unwrap();
+    assert_eq!(e["event"], "swap_result");
+    e["data"]["error"].clone()
+}
+
+#[test]
+fn swap_result_distinguishes_transfer_failure_from_zero_used() {
+    assert_eq!(sent_error(PromiseResult::Failed), "ft_transfer_call failed");
+    assert_eq!(sent_error(ok("junk")), "ft_transfer_call failed");
+    assert_eq!(sent_error(ok(r#""0""#)), "venue used 0");
 }

@@ -2,7 +2,7 @@
 //! Rhea DCL or Ref v1) and `register_token`. Only the owner moves funds out.
 //! Interface: docs/interfaces/vault.md. Security argument: README.md.
 
-use near_sdk::json_types::{Base58CryptoHash, U128};
+use near_sdk::json_types::{Base58CryptoHash, U128, U64};
 use near_sdk::serde_json::{self, Value};
 use near_sdk::{
     env, ext_contract, near, require, AccountId, Allowance, CryptoHash, Gas, NearToken, PanicOnDefault, Promise,
@@ -22,6 +22,11 @@ const GAS_FT_TRANSFER_CALL: Gas = Gas::from_tgas(100);
 const GAS_AFTER_SEND: Gas = Gas::from_tgas(25);
 /// Most a single `register_token` may pay (interface: 0.0125 NEAR).
 pub const MAX_STORAGE_DEPOSIT: NearToken = NearToken::from_micronear(12_500);
+/// Default most `register_token` may pay per window (interface: 0.1 NEAR per 24 h).
+pub const DEFAULT_STORAGE_BUDGET: NearToken = NearToken::from_millinear(100);
+/// Storage budget window: 24 h, starting at the first payment after the last window ended.
+pub const STORAGE_WINDOW_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
+const BUDGET_EXCEEDED: &str = "storage budget exceeded";
 /// NEAR kept back from swaps so the bot key can still pay gas.
 pub const SWAP_GAS_RESERVE: NearToken = NearToken::from_millinear(50);
 /// Results from untrusted contracts are read with this bound.
@@ -75,6 +80,61 @@ pub struct VaultState {
     pub paused: bool,
     pub bot_key: Option<String>,
     pub version: String,
+    pub storage_budget: StorageBudgetView,
+}
+
+/// `spent` counts only the current window: 0 once `window_start` + 24 h has passed.
+#[near(serializers = [json])]
+#[derive(Debug, PartialEq)]
+pub struct StorageBudgetView {
+    pub per_day: U128,
+    pub spent: U128,
+    pub window_start: U64,
+}
+
+#[near(serializers = [borsh])]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StorageBudget {
+    per_day: u128,
+    spent: u128,
+    /// Block timestamp (ns) of the window's first payment. 0 = none yet.
+    window_start: u64,
+}
+
+impl StorageBudget {
+    fn new() -> Self {
+        Self { per_day: DEFAULT_STORAGE_BUDGET.as_yoctonear(), spent: 0, window_start: 0 }
+    }
+
+    fn expired(&self, now: u64) -> bool {
+        now >= self.window_start.saturating_add(STORAGE_WINDOW_NS)
+    }
+
+    fn spent_now(&self, now: u64) -> u128 {
+        if self.expired(now) {
+            0
+        } else {
+            self.spent
+        }
+    }
+
+    /// Book `amount` in the current window, opening a new one if the last ended. Panics over budget.
+    fn spend(&mut self, amount: u128, now: u64) {
+        if self.expired(now) {
+            self.spent = 0;
+            self.window_start = now;
+        }
+        let total = self.spent.checked_add(amount).unwrap_or_else(|| env::panic_str(BUDGET_EXCEEDED));
+        require!(total <= self.per_day, BUDGET_EXCEEDED);
+        self.spent = total;
+    }
+
+    /// A deposit came back (storage_deposit failed). Only within the window it was booked in.
+    fn refund(&mut self, amount: u128, booked_in: u64) {
+        if booked_in == self.window_start {
+            self.spent = self.spent.saturating_sub(amount);
+        }
+    }
 }
 
 #[near(contract_state)]
@@ -83,6 +143,7 @@ pub struct Vault {
     owner_id: AccountId,
     paused: bool,
     bot_key: Option<PublicKey>,
+    storage_budget: StorageBudget,
 }
 
 fn me() -> AccountId {
@@ -130,7 +191,7 @@ impl Vault {
     pub fn new(owner_id: AccountId) -> Self {
         require!(env::predecessor_account_id() == owner_id, "new: caller must be owner_id");
         require!(owner_id != me(), "new: owner can't be the vault");
-        Self { owner_id, paused: false, bot_key: None }
+        Self { owner_id, paused: false, bot_key: None, storage_budget: StorageBudget::new() }
     }
 
     // ---------------- bot ----------------
@@ -142,9 +203,12 @@ impl Vault {
         self.start_swap(args, Side::Buy)
     }
 
-    /// Bot: NEP-145 registration of the vault on `token_id`, at most 0.0125 NEAR.
+    /// Bot: NEP-145 registration of the vault on `token_id`, at most 0.0125 NEAR, within the
+    /// storage budget. Fails here when the window's budget is used up, else in the callback.
     pub fn register_token(&mut self, token_id: AccountId) -> Promise {
         self.assert_bot();
+        let b = &self.storage_budget;
+        require!(b.spent_now(env::block_timestamp()) < b.per_day, BUDGET_EXCEEDED);
         ext_ft::ext(token_id.clone())
             .with_static_gas(GAS_VIEW)
             .storage_balance_of(me())
@@ -231,6 +295,14 @@ impl Vault {
         Promise::new(me()).delete_key(old)
     }
 
+    /// Most `register_token` may pay per 24 h window. 0 = no registrations. Takes effect at once,
+    /// for the current window too.
+    #[payable]
+    pub fn set_storage_budget(&mut self, per_day: U128) {
+        self.assert_owner();
+        self.storage_budget.per_day = per_day.0;
+    }
+
     /// Switch this account to the global contract with `code_hash`. State is kept.
     #[payable]
     pub fn owner_upgrade(&mut self, code_hash: Base58CryptoHash) -> Promise {
@@ -245,6 +317,11 @@ impl Vault {
             paused: self.paused,
             bot_key: self.bot_key.as_ref().map(String::from),
             version: VERSION.to_string(),
+            storage_budget: StorageBudgetView {
+                per_day: U128(self.storage_budget.per_day),
+                spent: U128(self.storage_budget.spent_now(env::block_timestamp())),
+                window_start: U64(self.storage_budget.window_start),
+            },
         }
     }
 
@@ -302,7 +379,8 @@ impl Vault {
         )
     }
 
-    /// Result [0]: amount of input the venue used (ft_transfer_call). 0 = swap failed, refunded.
+    /// Result [0]: amount of input the venue used (ft_transfer_call). 0 = swap failed, all input
+    /// refunded. Unreadable = the transfer or its resolve failed: where the input is isn't known.
     #[private]
     pub fn on_swap_sent(&mut self, token_out: AccountId, out_before: U128) -> PromiseOrValue<bool> {
         match result_u128(0) {
@@ -312,7 +390,8 @@ impl Vault {
                     .ft_balance_of(me())
                     .then(Self::ext(me()).with_static_gas(Gas::from_tgas(5)).on_swap_done(token_out, out_before)),
             ),
-            _ => swap_failed(&token_out, "swap failed, input refunded".into()),
+            Some(_) => swap_failed(&token_out, "venue used 0".into()),
+            None => swap_failed(&token_out, "ft_transfer_call failed".into()),
         }
     }
 
@@ -343,18 +422,23 @@ impl Vault {
             .0;
         require!(min <= MAX_STORAGE_DEPOSIT.as_yoctonear(), "storage deposit above 0.0125 NEAR");
         require!(min <= spendable(SWAP_GAS_RESERVE), "storage deposit above balance");
+        let now = env::block_timestamp();
+        self.storage_budget.spend(min, now);
+        let window = self.storage_budget.window_start;
         PromiseOrValue::Promise(
             ext_ft::ext(token_id.clone())
                 .with_static_gas(GAS_STORAGE_DEPOSIT)
                 .with_attached_deposit(NearToken::from_yoctonear(min))
                 .storage_deposit(Some(me()), Some(true))
-                .then(Self::ext(me()).with_static_gas(Gas::from_tgas(5)).on_registered(token_id, U128(min))),
+                .then(Self::ext(me()).with_static_gas(Gas::from_tgas(5)).on_registered(token_id, U128(min), U64(window))),
         )
     }
 
     #[private]
-    pub fn on_registered(&mut self, token_id: AccountId, deposit: U128) -> bool {
+    pub fn on_registered(&mut self, token_id: AccountId, deposit: U128, window: U64) -> bool {
         if result_bytes(0).is_none() {
+            // A failed storage_deposit refunds its deposit to us.
+            self.storage_budget.refund(deposit.0, window.0);
             return false;
         }
         VaultEvent::TokenRegistered { token_id, deposit }.emit();
