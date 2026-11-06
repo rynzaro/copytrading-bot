@@ -1,25 +1,58 @@
 import { describe, expect, it } from 'vitest'
-import { buildSetupPlan, vaultIdFor } from './vault-setup'
+import { SETUP_YOCTO, buildSetupPlan, ownerKind, setupBlocker, vaultIdFor } from './vault-setup'
 import { minOut, sellRoute, sellTx, withdrawTokenTx } from './owner-txs'
 import { nearToYocto } from './near'
+import { gas } from './tx'
 
 const KEY = 'ed25519:' + '1'.repeat(44)
 const HASH = '2'.repeat(44)
 
-describe('vault setup plan (stub until 0004)', () => {
-  it('costs under 1 NEAR and adds the bot key as owner', () => {
+describe('vault setup plan (contracts/vault/README.md "Account creation")', () => {
+  it('one owner tx: create, fund, global code by hash, init, bot key; no AddKey', () => {
     const p = buildSetupPlan({ ownerId: 'alice.near', botPublicKey: KEY, codeHash: HASH })
-    expect(p.vault_id).toBe('vault.alice.near')
+    expect(p.vault_id).toBe('copytrade.alice.near')
+    expect(p.txs).toHaveLength(1)
+    expect(p.txs[0].receiver_id).toBe('copytrade.alice.near')
+    expect(p.txs[0].actions).toEqual([
+      { kind: 'create_account' },
+      { kind: 'transfer', deposit: SETUP_YOCTO },
+      { kind: 'use_global_contract', code_hash: HASH },
+      { kind: 'function_call', method: 'new', args: { owner_id: 'alice.near' }, gas: gas(20), deposit: '0' },
+      {
+        kind: 'function_call',
+        method: 'set_bot_key',
+        args: { public_key: KEY, allowance: nearToYocto('1') },
+        gas: gas(50),
+        deposit: '1',
+      },
+    ])
+    expect(JSON.stringify(p)).not.toMatch(/add_key|deploy_contract/)
+  })
+  it('setup cost is the sum of measured parts, under 1 NEAR; funds ride along but are not cost', () => {
+    expect(SETUP_YOCTO).toBe(nearToYocto('0.06125'))
+    const p = buildSetupPlan({ ownerId: 'alice.near', botPublicKey: KEY, codeHash: HASH, fundsYocto: nearToYocto('10') })
+    expect(p.txs[0].actions[1]).toEqual({ kind: 'transfer', deposit: nearToYocto('10.06125') })
+    expect(p.cost_yocto).toBe((BigInt(SETUP_YOCTO) + 1n).toString())
     expect(BigInt(p.cost_yocto)).toBeLessThan(BigInt(nearToYocto('1')))
-    const first = p.txs[0]
-    expect(first.actions[0]).toEqual({ kind: 'create_account' })
-    expect(first.actions.some((a) => a.kind === 'function_call' && a.method === 'set_bot_key')).toBe(true)
-    expect(JSON.stringify(p)).not.toContain('add_key')
+    expect(p.funds_yocto).toBe(nearToYocto('10'))
   })
   it('rejects bad inputs', () => {
     expect(() => buildSetupPlan({ ownerId: 'alice.near', botPublicKey: 'x', codeHash: HASH })).toThrow()
     expect(() => buildSetupPlan({ ownerId: 'alice.near', botPublicKey: KEY, codeHash: 'x' })).toThrow()
+    expect(() => buildSetupPlan({ ownerId: 'alice.near', botPublicKey: KEY, codeHash: HASH, fundsYocto: '-1' })).toThrow()
     expect(vaultIdFor('a'.repeat(60) + '.near')).toBeNull()
+  })
+  it('implicit owners get a "use a named account" message', () => {
+    const hex = 'ab'.repeat(32)
+    expect(ownerKind(hex)).toBe('implicit')
+    expect(ownerKind('0x' + 'ab'.repeat(20))).toBe('eth_implicit')
+    expect(vaultIdFor(hex)).toBeNull()
+    expect(setupBlocker(hex)).toMatch(/implicit account.*named account/s)
+    expect(setupBlocker('0x' + 'ab'.repeat(20))).toMatch(/named account/)
+    expect(() => buildSetupPlan({ ownerId: hex, botPublicKey: KEY, codeHash: HASH })).toThrow(/named account/)
+    expect(setupBlocker('a'.repeat(52) + '.near')).toMatch(/too long/)
+    expect(setupBlocker('alice.near')).toBeNull()
+    expect(ownerKind('a'.repeat(49) + '.near')).toBe('named') // copytrade. + 54 = 64
   })
 })
 

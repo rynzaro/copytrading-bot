@@ -33,8 +33,21 @@ from .types import Plan
 log = logging.getLogger("copytrade.executor")
 
 TGAS = 10 ** 12
-SWAP_GAS = int(os.environ.get("SWAP_GAS_TGAS", "150")) * TGAS
-REGISTER_GAS = int(os.environ.get("REGISTER_GAS_TGAS", "50")) * TGAS
+
+
+def _tgas(name: str, default: int, lo: int, hi: int = 200) -> int:
+    """Env Tgas clamped to [lo, hi]. hi 200: 300 Tgas needs more than the 1 NEAR allowance (NotEnoughAllowance)."""
+    try:
+        v = int(os.environ.get(name, default))
+    except ValueError:
+        v = default
+    return min(max(v, lo), hi) * TGAS
+
+
+# Sandbox (contracts/vault tests/sandbox.rs `gas_sizing`): every buy shape (DCL/Ref v1, 1-2 hops; 3 can't pass
+# the route rules) needs >= 180 Tgas prepaid, burns ~27 Tgas; register_token >= 40, burns ~11.
+SWAP_GAS = _tgas("SWAP_GAS_TGAS", 200, 180)
+REGISTER_GAS = _tgas("REGISTER_GAS_TGAS", 50, 40)
 GAS_ALLOWANCE = int(os.environ.get("GAS_ALLOWANCE_YOCTO", str(10 ** 24)))   # vault.md default: 1 NEAR
 EVENT_STANDARD = "copytrade_vault"
 

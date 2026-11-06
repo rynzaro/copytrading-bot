@@ -7,7 +7,8 @@ the executor only advances that row.
 
 Entry point (DRY_RUN=1 default: signs, never sends):
     DATA_DIR=/tmp/ctw python -m copytrade_worker
-Env: DATA_DIR, DRY_RUN, RPC_URLS (or NEAR_RPC_URL), VAULT_CODE_HASH, WORKER_PORT (API, default 8700), NTFY_URL,
+Env: DATA_DIR, DB_PATH (default $DATA_DIR/copytrade.db, shared with web),
+DRY_RUN, RPC_URLS (or NEAR_RPC_URL), VAULT_CODE_HASH, WORKER_PORT (API, default 8700), NTFY_URL,
 TELEGRAM_BOT_TOKEN, HOST_NTFY_TOPIC, HOST_TELEGRAM_CHAT_ID.
 """
 
@@ -20,7 +21,7 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -31,7 +32,9 @@ from .executor import Executor
 from .keys import KeyStore
 from .notify.config import Config as NotifyConfig
 from .notify.loop import Notifier
+from .route import WNEAR
 from .signals import Pipeline
+from .types import MinOutInputs, Plan
 
 
 def log(kind: str, /, **kw: Any) -> None:
@@ -53,10 +56,9 @@ class Signals:
 
 
 def start(conn: Any = None, chain: Chain | None = None, stop: threading.Event | None = None) -> Signals:
-    data = os.environ.get("DATA_DIR") or "./data"
     if conn is None:
-        os.makedirs(data, exist_ok=True)
-        conn = db.connect(os.path.join(data, "worker.db"))
+        data_dir()
+        conn = db.connect(db_path())
     chain = chain or Chain()
     stop = stop or threading.Event()
     n = db.fail_stale_planned(conn, before_ms=db.now_ms())
@@ -122,6 +124,27 @@ def data_dir() -> str:
     return d
 
 
+def db_path() -> str:
+    """docs/interfaces/worker-api.md "Shared DB file": DB_PATH, else $DATA_DIR/copytrade.db (web does the same)."""
+    return os.environ.get("DB_PATH") or os.path.join(os.environ.get("DATA_DIR") or "./data", "copytrade.db")
+
+
+ex_lock = threading.Lock()  # the API serves requests on threads; one wNEAR registration at a time
+
+
+def register_wrap(ex: Executor) -> Callable[[str, str], None]:
+    """After /vault-confirmed: the bot registers the vault on wNEAR (vault README "Account creation"); a buy
+    refuses to send before that. DRY_RUN: signs and logs only. Same KeyStore as the executor: shared nonces."""
+    mi = MinOutInputs(price_guard_x=None, slippage_bps="unlimited", fill_price=None, pool_price=None)
+
+    def go(owner_id: str, vault_id: str) -> None:
+        key = ex.ks.load(owner_id)
+        plan = Plan(owner_id, vault_id, 0, WNEAR, None, (), "0", mi)
+        with ex_lock:
+            ex.ensure_registered(key, plan)
+    return go
+
+
 def run(
     path: str | None = None,
     chain: Chain | None = None,
@@ -134,14 +157,16 @@ def run(
     Refuses (SystemExit) with DRY_RUN=0 unless VAULT_CODE_HASH, RPC URLs and DATA_DIR are set."""
     check_startup()
     data = data_dir()
-    path = path or os.path.join(data, "worker.db")
+    path = path or db_path()
     sig = start(db.connect(path), chain=chain, stop=stop)
     rpc = rpc or Chain()  # own instance: executor latency not queued behind signal-side reads
     ks = KeyStore(data)
     ex = Executor(db.connect(path), rpc, ks)
     log("executor_start", dry_run=ex.dry_run)
     threading.Thread(target=ex.loop, args=(sig.pipeline.plans,), daemon=True, name="executor").start()
-    srv = serve(App(db.connect(path), rpc, ks, health_parts=sig.health_json), port=api_port)
+    reg = Executor(db.connect(path), rpc, ks)
+    srv = serve(App(db.connect(path), rpc, ks, health_parts=sig.health_json, on_confirmed=register_wrap(reg)),
+                port=api_port)
     log("api_start", port=srv.server_address[1])
     n = Notifier(db.connect(path), notify_config or NotifyConfig.from_env())
     threading.Thread(target=n.run_forever, args=(sig.stop,), daemon=True, name="notify").start()

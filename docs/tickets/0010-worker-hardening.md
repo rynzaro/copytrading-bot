@@ -9,7 +9,7 @@ Blocks go-live (items 1–3); 4–5 strongly wanted.
 5. Startup checks: refuse to start with DRY_RUN=0 unless `VAULT_CODE_HASH`, RPC URLs and data dir are set.
 
 ## Status (2026-11-06)
-Items 2–5 done. Item 1 waits for 0004.
+Items 1–5 done. Item 1 (in 0009): sandbox `gas_sizing` measured DCL and Ref v1 buys, 1 and 2 hops (3 hops can't pass the buy rules): min 180 Tgas prepaid, ~27 burnt; `register_token` min 40, ~11 burnt. Worker sends 200 / 50 Tgas (env clamped to 180–200 / 40–200). Gas vs 1 NEAR allowance: contracts/vault/README.md residual risk 3. Open: confirm 200 Tgas against the real venues on the first mainnet test-wallet buy.
 
 ## Follow-ups
 - `sent` row with tx never found: after the tx validity window (~24 h), settle by the vault's balance of that token (> 0 → `filled`, else `failed` with `tx_lost`), using an archival RPC if available.

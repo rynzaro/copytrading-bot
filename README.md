@@ -50,13 +50,13 @@ Update: `git pull && docker compose up -d --build`. After changing `VAULT_CODE_H
 
 Everything lives in `data/` at the repo root (change it with `DATA_DIR`):
 
-- `data/worker.db`: SQLite, shared by web and worker.
+- `data/copytrade.db`: SQLite, shared by web and worker.
 - `data/keys/`: one bot private key per user (dir 0700, files 0600, owner uid 10001). The web container runs as another uid and cannot read them.
 
-Back up `data/keys/` (and `worker.db`) to somewhere encrypted. If you lose the keys, nobody's funds are at risk: they stay in the vaults, and owners can still withdraw. Each user must then add a new bot key to their vault before the bot trades for them again. If someone steals the keys, the most they can do is swap vault funds into meme tokens: owners should pause their vaults and remove the old bot key.
+Back up `data/keys/` (and `copytrade.db`) to somewhere encrypted. If you lose the keys, nobody's funds are at risk: they stay in the vaults, and owners can still withdraw. Each user must then add a new bot key to their vault before the bot trades for them again. If someone steals the keys, the most they can do is swap vault funds into meme tokens: owners should pause their vaults and remove the old bot key.
 
 SQLite backup without stopping:
 
 ```sh
-docker compose exec worker python -c "import sqlite3; s=sqlite3.connect('/data/worker.db'); d=sqlite3.connect('/data/backup.db'); s.backup(d)"
+docker compose exec worker python -c "import sqlite3; s=sqlite3.connect('/data/copytrade.db'); d=sqlite3.connect('/data/backup.db'); s.backup(d)"
 ```

@@ -1,0 +1,181 @@
+{
+  "owner": "alice.test.near",
+  "vault": "copytrade.alice.test.near",
+  "bot_key": "ed25519:11111111111111111111111111111111111111111111",
+  "code_hash": "22222222222222222222222222222222222222222222",
+  "steps": {
+    "setup": {
+      "receiver_id": "copytrade.alice.test.near",
+      "label": "Create trading wallet",
+      "actions": [
+        {
+          "kind": "create_account"
+        },
+        {
+          "kind": "transfer",
+          "deposit": "10061250000000000000000000"
+        },
+        {
+          "kind": "use_global_contract",
+          "code_hash": "22222222222222222222222222222222222222222222"
+        },
+        {
+          "kind": "function_call",
+          "method": "new",
+          "args": {
+            "owner_id": "alice.test.near"
+          },
+          "gas": "20000000000000",
+          "deposit": "0"
+        },
+        {
+          "kind": "function_call",
+          "method": "set_bot_key",
+          "args": {
+            "public_key": "ed25519:11111111111111111111111111111111111111111111",
+            "allowance": "1000000000000000000000000"
+          },
+          "gas": "50000000000000",
+          "deposit": "1"
+        }
+      ]
+    },
+    "deposit": {
+      "receiver_id": "copytrade.alice.test.near",
+      "label": "Deposit",
+      "actions": [
+        {
+          "kind": "transfer",
+          "deposit": "5000000000000000000000000"
+        }
+      ]
+    },
+    "pause": {
+      "receiver_id": "copytrade.alice.test.near",
+      "label": "Pause",
+      "actions": [
+        {
+          "kind": "function_call",
+          "method": "pause",
+          "args": {},
+          "gas": "50000000000000",
+          "deposit": "1"
+        }
+      ]
+    },
+    "unpause": {
+      "receiver_id": "copytrade.alice.test.near",
+      "label": "Resume",
+      "actions": [
+        {
+          "kind": "function_call",
+          "method": "unpause",
+          "args": {},
+          "gas": "50000000000000",
+          "deposit": "1"
+        }
+      ]
+    },
+    "refill": {
+      "receiver_id": "copytrade.alice.test.near",
+      "label": "Refill bot key",
+      "actions": [
+        {
+          "kind": "function_call",
+          "method": "set_bot_key",
+          "args": {
+            "public_key": "ed25519:11111111111111111111111111111111111111111111",
+            "allowance": "1000000000000000000000000"
+          },
+          "gas": "50000000000000",
+          "deposit": "1"
+        }
+      ]
+    },
+    "sell": {
+      "receiver_id": "copytrade.alice.test.near",
+      "label": "Sell",
+      "actions": [
+        {
+          "kind": "function_call",
+          "method": "sell",
+          "args": {
+            "args": {
+              "venue": "dcl",
+              "hops": [
+                {
+                  "pool_id": "meme.near|wrap.near|2000",
+                  "token_in": "meme.near",
+                  "token_out": "wrap.near"
+                }
+              ],
+              "amount_in": "1000000000000000000000000",
+              "min_out": "1"
+            }
+          },
+          "gas": "300000000000000",
+          "deposit": "1"
+        }
+      ]
+    },
+    "withdraw_token": {
+      "receiver_id": "copytrade.alice.test.near",
+      "label": "Withdraw token",
+      "actions": [
+        {
+          "kind": "function_call",
+          "method": "withdraw_token",
+          "args": {
+            "token_id": "meme.near",
+            "amount": null
+          },
+          "gas": "100000000000000",
+          "deposit": "1"
+        }
+      ]
+    },
+    "withdraw_near": {
+      "receiver_id": "copytrade.alice.test.near",
+      "label": "Withdraw NEAR",
+      "actions": [
+        {
+          "kind": "function_call",
+          "method": "withdraw_near",
+          "args": {
+            "amount": "1000000000000000000000000"
+          },
+          "gas": "100000000000000",
+          "deposit": "1"
+        }
+      ]
+    },
+    "remove_bot_key": {
+      "receiver_id": "copytrade.alice.test.near",
+      "label": "Remove bot key",
+      "actions": [
+        {
+          "kind": "function_call",
+          "method": "remove_bot_key",
+          "args": {},
+          "gas": "50000000000000",
+          "deposit": "1"
+        }
+      ]
+    },
+    "withdraw_all": {
+      "receiver_id": "copytrade.alice.test.near",
+      "label": "Withdraw NEAR",
+      "actions": [
+        {
+          "kind": "function_call",
+          "method": "withdraw_near",
+          "args": {
+            "amount": null
+          },
+          "gas": "100000000000000",
+          "deposit": "1"
+        }
+      ]
+    }
+  }
+}

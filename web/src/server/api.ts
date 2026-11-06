@@ -11,7 +11,7 @@ import * as repo from './repo'
 import { quoteHop } from './quote'
 import { botBlockers, validateSettings } from '@/lib/settings'
 import { isAccountId, WRAP } from '@/lib/near'
-import { vaultIdFor } from '@/lib/vault-setup'
+import { setupBlocker, vaultIdFor } from '@/lib/vault-setup'
 import { minOut, sellRoute, type SwapArgs } from '@/lib/owner-txs'
 
 export type ApiDeps = {
@@ -197,7 +197,8 @@ export function createApi(d: ApiDeps) {
         return json(repo.createTelegramLink(d.db, owner, now()))
 
       case 'POST /setup/bot-key': {
-        if (!vaultIdFor(owner)) return err(400, 'account name too long for a vault')
+        const blocked = setupBlocker(owner)
+        if (blocked) return err(400, blocked)
         try {
           const r = await d.worker.botKey(owner)
           return json({ public_key: r.public_key, vault_id: vaultIdFor(owner) })

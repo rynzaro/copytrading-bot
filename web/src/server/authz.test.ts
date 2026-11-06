@@ -92,9 +92,17 @@ describe('bot toggle and owner flows', () => {
 
   it('setup: bot key then confirm the derived vault id', async () => {
     const k = await (await h.req('POST', '/setup/bot-key', { token: a })).json()
-    expect(k.vault_id).toBe('vault.alice.near')
-    expect((await h.req('POST', '/setup/confirm', { token: a, body: { vault_id: 'vault.alice.near' } })).status).toBe(200)
-    expect(h.worker.calls).toEqual(['bot-key alice.near', 'confirm alice.near vault.alice.near'])
+    expect(k.vault_id).toBe('copytrade.alice.near')
+    expect((await h.req('POST', '/setup/confirm', { token: a, body: { vault_id: 'copytrade.alice.near' } })).status).toBe(200)
+    expect(h.worker.calls).toEqual(['bot-key alice.near', 'confirm alice.near copytrade.alice.near'])
+  })
+
+  it('setup refuses implicit owners with a clear message, without asking the worker', async () => {
+    const imp = h.login('a'.repeat(64))
+    const r = await h.req('POST', '/setup/bot-key', { token: imp })
+    expect(r.status).toBe(400)
+    expect(JSON.stringify(await r.json())).toContain('named account')
+    expect(h.worker.calls).toEqual([])
   })
 
   it('sell quote applies slippage to the reverse route', async () => {
