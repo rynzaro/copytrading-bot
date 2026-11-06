@@ -142,34 +142,31 @@ def limit_order_owners(conn: sqlite3.Connection, target_id: str) -> list[str]:
 def add_limit_order_alert(
     conn: sqlite3.Connection, owner_id: str, payload: dict[str, Any], now: int | None = None
 ) -> int | None:
-    """Insert a `limit_order` activity row unless one exists for (owner, stage, tx_hash, token_id): one order per
-    placing tx and token. Returns the new id, or None for a duplicate. Callers serialize writes (one lock)."""
+    """Insert a `limit_order` activity row unless one exists for (owner, stage, order_id).
+    Returns the new id, or None for a duplicate. Callers serialize writes (one lock)."""
     cur = conn.execute(
         "INSERT INTO activity(owner_id, kind, payload, created_at) SELECT ?, 'limit_order', ?, ?"
         " WHERE NOT EXISTS (SELECT 1 FROM activity WHERE owner_id = ? AND kind = 'limit_order'"
-        " AND json_extract(payload, '$.stage') = ? AND json_extract(payload, '$.tx_hash') = ?"
-        " AND json_extract(payload, '$.token_id') = ?)",
+        " AND json_extract(payload, '$.stage') = ? AND json_extract(payload, '$.order_id') = ?)",
         (
             owner_id,
             json.dumps(payload, separators=(",", ":")),
             now_ms() if now is None else now,
             owner_id,
             payload["stage"],
-            payload["tx_hash"],
-            payload["token_id"],
+            payload["order_id"],
         ),
     )
     return cur.lastrowid if cur.rowcount == 1 else None
 
 
-def placed_order_tx(conn: sqlite3.Connection, target_id: str, token_id: str, pool_id: str, since: int) -> str | None:
-    """Placing tx of the latest stored 'placed' alert for this target, token and pool since `since` (ms)."""
+def placed_order_tx(conn: sqlite3.Connection, order_id: str) -> str | None:
+    """Placing tx from a stored 'placed' alert for this DCL order, or None."""
     r = conn.execute(
         "SELECT json_extract(payload, '$.tx_hash') FROM activity WHERE kind = 'limit_order'"
-        " AND json_extract(payload, '$.stage') = 'placed' AND json_extract(payload, '$.target_id') = ?"
-        " AND json_extract(payload, '$.token_id') = ? AND json_extract(payload, '$.pool_id') = ? AND created_at >= ?"
-        " ORDER BY created_at DESC, id DESC LIMIT 1",
-        (target_id, token_id, pool_id, since),
+        " AND json_extract(payload, '$.stage') = 'placed' AND json_extract(payload, '$.order_id') = ?"
+        " ORDER BY id DESC LIMIT 1",
+        (order_id,),
     ).fetchone()
     return r[0] if r and isinstance(r[0], str) else None
 

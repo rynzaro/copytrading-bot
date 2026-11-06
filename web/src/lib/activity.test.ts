@@ -35,6 +35,7 @@ describe('activity rendering (db.sql payload keys)', () => {
       tx_hash: 'H2',
     })
     expect(describeActivity('limit_order', { ...p, stage: 'filled' }).title).toBe('Limit buy by simsey.near filled: b.near')
+    expect(describeActivity('limit_order', { ...p, stage: 'filled', order_id: 'o1', tx_hash: undefined }).tx_hash).toBeNull()
     expect(describeActivity('limit_order', { ...p, stage: 'weird', price: 'x' })).toMatchObject({
       title: 'simsey.near placed a limit buy: b.near',
       detail: '14 NEAR · no copy buy',

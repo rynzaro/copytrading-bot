@@ -162,7 +162,7 @@ def test_sniping_tax_cache(conn, age_min, cached, skipped):
 ORDER_TX = "7PZZMDLCwjXyPRTBpQ1ui85ko43tPbGeLUrMJcaUGqsx"
 OID = BATMAN + "|wrap.near|10000#12480"
 POOL = BATMAN + "|wrap.near|10000"
-KEYS = {"stage", "target_id", "token_id", "pool_id", "amount_near", "price", "tx_hash"}
+KEYS = {"stage", "order_id", "target_id", "token_id", "pool_id", "amount_near", "price", "tx_hash"}
 
 
 def order_row(bought=0, remain=14 * 10**24, **kw):
@@ -208,8 +208,17 @@ def test_limit_order_placed_alerts_users_never_buys(conn):
     ]
     pl = acts[0][2]
     assert set(pl) == KEYS
-    assert (pl["stage"], pl["target_id"], pl["token_id"], pl["pool_id"], pl["amount_near"], pl["tx_hash"]) == (
+    assert (
+        pl["stage"],
+        pl["order_id"],
+        pl["target_id"],
+        pl["token_id"],
+        pl["pool_id"],
+        pl["amount_near"],
+        pl["tx_hash"],
+    ) == (
         "placed",
+        OID,
         "simsey.near",
         BATMAN,
         POOL,
@@ -269,14 +278,37 @@ def test_filled_after_restart_uses_placed_tx_and_dedupes(conn):
     assert len(activity(conn)) == 2
 
 
-def test_seeded_order_without_known_placing_tx_is_skipped(conn):
+def test_seeded_order_without_known_placing_tx_alerts_without_tx(conn):
     add_user(conn, "a.near", target="simsey.near")
     ch = FakeChain(orders={"simsey.near": [order_row()]})
     p = pipe(conn, ch)
     p.seed_orders()
-    ch.orders = {"simsey.near": [order_row(bought=10, remain=10**24)]}
-    assert p.poll_orders() == []
-    assert activity(conn) == []
+    ch.orders = {"simsey.near": [order_row(bought=10**18, remain=10**24)]}
+    assert len(p.poll_orders()) == 1
+    ((_, _, pl),) = activity(conn)
+    assert (pl["stage"], pl["order_id"], "tx_hash" in pl) == ("filled", OID, False)
+    assert set(pl) == KEYS - {"tx_hash"}
+
+
+def test_two_orders_same_tx_and_token_each_alert(conn):
+    add_user(conn, "a.near", target="simsey.near")
+    p = pipe(conn)
+    raw = dict(
+        stage="fill",
+        kind="order",
+        whale="simsey.near",
+        token=BATMAN,
+        token_in="wrap.near",
+        amount_in="5",
+        point=55200,
+        pools=[POOL],
+        tx="LADDER",
+        order_id="o1",
+    )
+    assert len(p.on_order(raw)) == 1
+    assert len(p.on_order(dict(raw, order_id="o2"))) == 1
+    assert p.on_order(raw) == []
+    assert [x[2]["order_id"] for x in activity(conn)] == ["o1", "o2"]
 
 
 def test_order_completed_event_fills_watched_order(conn):

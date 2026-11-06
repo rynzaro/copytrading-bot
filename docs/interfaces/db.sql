@@ -95,7 +95,8 @@ CREATE TABLE IF NOT EXISTS activity (
 --   still_active: vault_id*
 --   sell:         token_id*, amount_in*, amount_out, tx_hash
 --   withdraw:     token_id*, amount*, tx_hash
---   limit_order:  stage* ('placed'|'filled'), target_id*, token_id*, pool_id*, amount_near*, price (NEAR per whole token), tx_hash*
+--   limit_order:  stage* ('placed'|'filled'), order_id* (DCL order id), target_id*, token_id*, pool_id*, amount_near*, price (NEAR per whole token), tx_hash (placing tx; * for 'placed')
+--                 one row per (owner_id, stage, order_id)
 --   system:       text*
 CREATE INDEX IF NOT EXISTS activity_unnotified ON activity(notified_at) WHERE notified_at IS NULL;
 

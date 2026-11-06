@@ -2,7 +2,7 @@
 
 Only executed swaps are signals. DCL limit buy orders (paid in wNEAR) by a copy target are never bought: they
 write `limit_order` activity rows, stage 'placed' on `order_added` and 'filled' at the first bought amount
-(order watch: list_active_orders poll and claim/cancel events). One row per (placing tx, token, stage, user), for
+(order watch: list_active_orders poll and claim/cancel events). One row per (order id, stage, user), for
 users with the target enabled, the bot on and `notify.limit_orders` not false. Tx-stage sightings are never copied.
 Per user, `rules.plan` decides. A plan first claims the copy_buys row ('planned'); only then it is queued.
 Skips go to `activity` (buy_skipped), except the quiet ones (bot off, target off for that user).
@@ -89,7 +89,7 @@ class Pipeline:
 
     def seed_orders(self) -> None:
         """At start: targets' open, unfilled wNEAR buy orders (placed before a restart) are watched again. Their
-        placing tx comes from the stored 'placed' alert at fill time."""
+        placing tx comes from the stored 'placed' alert at fill time; none stored: the fill alert has no tx."""
         for target in self.targets():
             for r in self.chain.active_orders(target) or []:
                 oid, tok, pool = r.get("order_id"), r.get("buy_token"), r.get("pool_id")
@@ -105,23 +105,25 @@ class Pipeline:
             if not v or v["fired"] or v["target"] != fill.get("whale"):
                 return []
             v["fired"] = True
+        oid = str(fill["order_id"])
         tx = v["tx"]
-        if tx is None:
+        if tx is None:  # reseeded after a restart: placing tx from the stored 'placed' row, if any
             with self.lock:
-                tx = db.placed_order_tx(self.conn, v["target"], v["token"], v["pool"], self.clock() - WATCH_S * 1000)
-        if tx is None:
-            self.log("order_fill_untracked", target=v["target"], token=v["token"], order_id=fill.get("order_id"))
-            return []
+                tx = db.placed_order_tx(self.conn, oid)
         sold, bought = detect._amount(fill.get("amount_in")), detect._amount(fill.get("amount_out"))
         if sold is None:
             return []
-        o = dict(target_id=v["target"], token_id=v["token"], pool_id=v["pool"], tx_hash=tx)
+        o = dict(order_id=oid, target_id=v["target"], token_id=v["token"], pool_id=v["pool"], tx_hash=tx)
         price = self.fill_price(v["token"], sold, bought) or self.point_price(v["token"], v["pool"], fill.get("point"))
         return self.alert("filled", o, sold, price)
 
     def alert(self, stage: str, o: dict[str, Any], amount_near: str, price: float | None) -> list[int]:
-        payload: dict[str, Any] = dict(stage=stage, **{k: o[k] for k in ("target_id", "token_id", "pool_id")})
-        payload.update(amount_near=amount_near, tx_hash=o["tx_hash"])
+        payload: dict[str, Any] = dict(
+            stage=stage, **{k: o[k] for k in ("order_id", "target_id", "token_id", "pool_id")}
+        )
+        payload["amount_near"] = amount_near
+        if o.get("tx_hash"):
+            payload["tx_hash"] = o["tx_hash"]
         if price is not None:
             payload["price"] = price
         with self.lock:
