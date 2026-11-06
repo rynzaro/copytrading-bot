@@ -1,0 +1,15 @@
+{
+  "generator": "near-api-js@4",
+  "seed_hex": "f599ae2f7f255282c29029ccc4d71f964180e31eb4526640461fd458c5fc84c5",
+  "public_key": "ed25519:JDmWZSW2ngShWdbCLcPuqNvyU7cKZQsXWGgKFM325Pyd",
+  "signer_id": "alice-vault.near",
+  "receiver_id": "alice-vault.near",
+  "nonce": "12345678901",
+  "block_hash": "5wbD6GsVBReHetMUw17QcNne8BjB1xSKRoU4JYpafEx5",
+  "method": "swap",
+  "args_json": "{\"args\":{\"venue\":\"dcl\",\"hops\":[{\"pool_id\":\"meme.near|wrap.near|2000\",\"token_in\":\"wrap.near\",\"token_out\":\"meme.near\"}],\"amount_in\":\"10000000000000000000000000\",\"min_out\":\"1\"}}",
+  "gas": "100000000000000",
+  "deposit": "0",
+  "tx_hash": "3g6uGkgPDgPXYvkiAvPWo3t3auHRzxHBrn4ueNkNsGCZ",
+  "signed_tx_base64": "EAAAAGFsaWNlLXZhdWx0Lm5lYXIA/9v5hAftDpJFTaYtDOwzfbBD5urAiCp4YTKzSdEVatw1HNzfAgAAABAAAABhbGljZS12YXVsdC5uZWFySWrKgOTY8p+46M2BbDr7SNPxA5cLOi7hYAwIymcybe4BAAAAAgQAAABzd2FwrgAAAHsiYXJncyI6eyJ2ZW51ZSI6ImRjbCIsImhvcHMiOlt7InBvb2xfaWQiOiJtZW1lLm5lYXJ8d3JhcC5uZWFyfDIwMDAiLCJ0b2tlbl9pbiI6IndyYXAubmVhciIsInRva2VuX291dCI6Im1lbWUubmVhciJ9XSwiYW1vdW50X2luIjoiMTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJtaW5fb3V0IjoiMSJ9fQBAehDzWgAAAAAAAAAAAAAAAAAAAAAAAADGrVZGZhXJ2ub8HWfKtNjx4eCAnRFsvnA1doXiZuPMJSg2CuLDyqm/G14QwsS7FokxncFJL8GmW9zO/e02Xv8I"
+}

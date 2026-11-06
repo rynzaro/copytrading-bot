@@ -1,0 +1,28 @@
+# Minimal version from ticket 0006 (executor). Ticket 0005 owns this file: its version wins on merge.
+[project]
+name = "copytrade-worker"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["cryptography>=42"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff", "mypy"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["copytrade_worker*"]
+
+[tool.setuptools.package-data]
+copytrade_worker = ["db.sql", "*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["RUF059"]
