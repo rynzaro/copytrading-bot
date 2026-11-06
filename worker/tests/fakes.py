@@ -32,6 +32,7 @@ class FakeRpc:
         self.outcomes: list = []        # popped per tx_status call for a new hash; dict, None (pending), or callable
         self.send_errors: list = []     # popped per send_tx: None = ok, else error object
         self.views = 0
+        self.status_calls: list[tuple[str, str]] = []
         self.down: set[str] = set()     # method names that raise RpcDown (no endpoint answered)
         self.url = "http://rpc.test"
         self._res: dict[str, object] = {}
@@ -77,6 +78,7 @@ class FakeRpc:
 
     def tx_status(self, tx_hash, sender):
         self._maybe_down("tx_status")
+        self.status_calls.append((tx_hash, sender))
         if tx_hash not in self._res:
             o = self.outcomes.pop(0) if self.outcomes else outcome()
             self._res[tx_hash] = o
