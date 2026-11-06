@@ -22,6 +22,7 @@ type Form = {
   unlimited: boolean
   ntfy: string
   still_active: boolean
+  limit_orders: boolean
 }
 
 const toForm = (s: S): Form => ({
@@ -32,6 +33,7 @@ const toForm = (s: S): Form => ({
   unlimited: s.slippage_bps === 'unlimited',
   ntfy: s.notify.ntfy_topic ?? '',
   still_active: s.notify.still_active_weekly,
+  limit_orders: s.notify.limit_orders,
 })
 
 const num = (v: string) => (v.trim() === '' ? NaN : Number(v.replace(/[_,\s]/g, '')))
@@ -42,7 +44,7 @@ function fromForm(f: Form, prev: S): unknown {
     min_mcap_usd: f.min_mcap.trim() === '' ? 0 : num(f.min_mcap),
     price_guard_x: f.guard.trim() === '' ? null : num(f.guard),
     slippage_bps: f.unlimited ? 'unlimited' : f.slippage_pct.trim() === '' ? null : Math.round(num(f.slippage_pct) * 100),
-    notify: { ntfy_topic: f.ntfy.trim() || null, telegram_chat_id: prev.notify.telegram_chat_id, still_active_weekly: f.still_active },
+    notify: { ntfy_topic: f.ntfy.trim() || null, telegram_chat_id: prev.notify.telegram_chat_id, still_active_weekly: f.still_active, limit_orders: f.limit_orders },
   }
 }
 
@@ -130,6 +132,11 @@ export function SettingsView({ me, vault, onSaved }: { me: Me; vault: VaultInfo 
               <Label>Weekly still-active reminder</Label>
               <Description>Reminds you that the bot key still works on your trading wallet.</Description>
               <Switch color="amber" checked={f.still_active} onChange={(v) => set({ still_active: v })} />
+            </SwitchField>
+            <SwitchField>
+              <Label>Limit-order alerts</Label>
+              <Description>Tells you when a copy target places a limit buy order and when it fills. The bot never buys on these.</Description>
+              <Switch color="amber" checked={f.limit_orders} onChange={(v) => set({ limit_orders: v })} />
             </SwitchField>
           </div>
         </Card>

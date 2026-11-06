@@ -72,10 +72,10 @@ def format_activity(kind: str, payload: dict) -> str:
         text = f"Withdraw {tok}{tx_s}"
     elif kind == "limit_order":
         who = clean(p.get("target_id"))
-        what = "limit buy filled" if p.get("stage") == "filled" else "placed a limit buy"
+        head = f"Limit buy by {who} filled" if p.get("stage") == "filled" else f"{who} placed a limit buy"
         px = fmt_price(p.get("price"))
         at = f" at {px} NEAR" if px is not None else ""
-        text = f"{who} {what}: {tok}{_near(p, 'amount_near')}{at}. No copy buy.{tx_s}"
+        text = f"{head}: {tok}{_near(p, 'amount_near')}{at}. No copy buy.{tx_s}"
     elif kind == "system":
         text = clean(p.get("text") or "System event", 200)
     else:

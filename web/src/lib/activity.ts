@@ -5,6 +5,13 @@ export type ActivityView = { title: string; detail: string; tone: 'good' | 'bad'
 
 const s = (v: unknown, max = 80): string | null => (typeof v === 'string' && v.length ? (v.length > max ? v.slice(0, max) + '…' : v) : null)
 const near = (v: unknown, dp = 4): string | null => (typeof v === 'string' && /^\d{1,40}$/.test(v) ? `${formatNear(v, dp)} NEAR` : null)
+/** NEAR per whole token: 6 significant digits after leading zeros, no exponent. Null unless finite and > 0. */
+const price = (v: unknown): string | null => {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0 || v >= 1e12) return null
+  const zeros = v < 1 ? Math.max(0, -Math.floor(Math.log10(v)) - 1) : 0
+  const s = v.toFixed(Math.min(20, v < 1 ? zeros + 6 : 4))
+  return `${s.includes('.') ? s.replace(/\.?0+$/, '') : s} NEAR`
+}
 const join = (...parts: (string | null)[]) => parts.filter(Boolean).join(' · ')
 
 export function describeActivity(kind: string, p: Record<string, unknown>): ActivityView {
@@ -30,6 +37,12 @@ export function describeActivity(kind: string, p: Record<string, unknown>): Acti
       const isNear = p.token_id === WRAP || p.token_id === 'near'
       const amt = isNear ? near(p.amount) : typeof p.amount === 'string' && /^\d{1,40}$/.test(p.amount) ? `${p.amount} raw units` : null
       return v(isNear ? 'Withdrew NEAR' : `Withdrew ${tok}`, join(amt))
+    }
+    case 'limit_order': {
+      const who = s(p.target_id) ?? '?'
+      const px = price(p.price)
+      const title = p.stage === 'filled' ? `Limit buy by ${who} filled: ${tok}` : `${who} placed a limit buy: ${tok}`
+      return v(title, join(near(p.amount_near), px && `at ${px}`, 'no copy buy'))
     }
     case 'system':
       return v(s(p.text, 200) ?? 'System', '')

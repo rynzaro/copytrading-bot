@@ -51,6 +51,17 @@ describe('settings validation', () => {
     expect(validateSettings({ ...ok(), extra: 1 }).ok).toBe(false)
   })
 
+  it('notify.limit_orders: boolean, default on, missing means on', () => {
+    expect(DEFAULT_SETTINGS.notify.limit_orders).toBe(true)
+    expect(validateSettings({ ...ok(), notify: { ...ok().notify, limit_orders: false } })).toMatchObject({ ok: true, value: { notify: { limit_orders: false } } })
+    expect(validateSettings({ ...ok(), notify: { ...ok().notify, limit_orders: 'no' } }).ok).toBe(false)
+    const older: Record<string, unknown> = { ...ok().notify }
+    delete older.limit_orders
+    expect(validateSettings({ ...ok(), notify: older })).toMatchObject({ ok: true, value: { notify: { limit_orders: true } } })
+    expect(parseSettings(JSON.stringify({ notify: { limit_orders: false } })).notify.limit_orders).toBe(false)
+    expect(parseSettings(JSON.stringify({ notify: { ntfy_topic: 'x' } })).notify.limit_orders).toBe(true)
+  })
+
   it('parseSettings fills defaults for stored partial JSON and survives garbage', () => {
     expect(parseSettings('{}')).toEqual(DEFAULT_SETTINGS)
     expect(parseSettings('not json')).toEqual(DEFAULT_SETTINGS)

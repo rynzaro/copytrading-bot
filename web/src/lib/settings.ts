@@ -6,6 +6,7 @@ export type Notify = {
   ntfy_topic: string | null
   telegram_chat_id: string | null
   still_active_weekly: boolean
+  limit_orders: boolean // alerts on copy targets' limit buy orders (placed, filled); default on
 }
 export type Settings = {
   ladder: Band[]
@@ -23,7 +24,7 @@ export const DEFAULT_SETTINGS: Settings = {
   min_mcap_usd: 0,
   price_guard_x: null,
   slippage_bps: null,
-  notify: { ntfy_topic: null, telegram_chat_id: null, still_active_weekly: true },
+  notify: { ntfy_topic: null, telegram_chat_id: null, still_active_weekly: true, limit_orders: true },
 }
 
 export const MAX_BANDS = 5
@@ -73,13 +74,15 @@ export function validateSettings(input: unknown): Result {
     return { ok: false, error: 'slippage must be 1 to 10000 bps or unlimited' }
 
   if (!isObj(notify)) return { ok: false, error: 'notify must be an object' }
-  const nx = onlyKeys(notify, ['ntfy_topic', 'telegram_chat_id', 'still_active_weekly'])
+  const nx = onlyKeys(notify, ['ntfy_topic', 'telegram_chat_id', 'still_active_weekly', 'limit_orders'])
   if (nx) return { ok: false, error: nx }
   if (notify.ntfy_topic !== null && (typeof notify.ntfy_topic !== 'string' || !NTFY_TOPIC.test(notify.ntfy_topic)))
     return { ok: false, error: 'ntfy topic: letters, digits, _ and -, up to 64' }
   if (notify.telegram_chat_id !== null && typeof notify.telegram_chat_id !== 'string')
     return { ok: false, error: 'bad telegram chat id' }
   if (typeof notify.still_active_weekly !== 'boolean') return { ok: false, error: 'bad still-active flag' }
+  if (notify.limit_orders !== undefined && typeof notify.limit_orders !== 'boolean')
+    return { ok: false, error: 'bad limit-order alerts flag' }
 
   return {
     ok: true,
@@ -92,6 +95,7 @@ export function validateSettings(input: unknown): Result {
         ntfy_topic: notify.ntfy_topic as string | null,
         telegram_chat_id: notify.telegram_chat_id as string | null,
         still_active_weekly: notify.still_active_weekly,
+        limit_orders: notify.limit_orders !== false,
       },
     },
   }

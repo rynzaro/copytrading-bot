@@ -57,7 +57,7 @@ def test_clean_strips_controls_and_truncates():
                 "amount_near": str(YOCTO),
                 "tx_hash": "H3",
             },
-            ["w.near", "limit buy filled", "b.near", "1 NEAR", "No copy buy", "H3"],
+            ["Limit buy by w.near filled: b.near", "1 NEAR", "No copy buy", "H3"],
         ),
         ("weird_kind", {}, ["weird_kind"]),
     ],

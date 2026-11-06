@@ -26,6 +26,23 @@ describe('activity rendering (db.sql payload keys)', () => {
     expect(describeActivity('system', { text: 'Feed down' }).title).toBe('Feed down')
   })
 
+  it('renders limit_order alerts, both stages, never as a buy', () => {
+    const p = { target_id: 'simsey.near', token_id: 'b.near', pool_id: 'b.near|wrap.near|10000', amount_near: N('14'), price: 0.000249567, tx_hash: 'H2' }
+    expect(describeActivity('limit_order', { ...p, stage: 'placed' })).toMatchObject({
+      title: 'simsey.near placed a limit buy: b.near',
+      detail: '14 NEAR · at 0.000249567 NEAR · no copy buy',
+      tone: 'neutral',
+      tx_hash: 'H2',
+    })
+    expect(describeActivity('limit_order', { ...p, stage: 'filled' }).title).toBe('Limit buy by simsey.near filled: b.near')
+    expect(describeActivity('limit_order', { ...p, stage: 'weird', price: 'x' })).toMatchObject({
+      title: 'simsey.near placed a limit buy: b.near',
+      detail: '14 NEAR · no copy buy',
+    })
+    for (const price of [Infinity, -1, 0, NaN, true]) expect(describeActivity('limit_order', { ...p, price }).detail).not.toMatch(/at /)
+    expect(describeActivity('limit_order', {}).title).toBe('? placed a limit buy: ?')
+  })
+
   it('survives missing or hostile payloads', () => {
     expect(describeActivity('buy_filled', {}).title).toBe('Bought ?')
     expect(describeActivity('buy_filled', { token_id: 'x', amount_in: 'NaN' }).detail).toBe('')
