@@ -81,6 +81,16 @@ CREATE TABLE IF NOT EXISTS activity (
   created_at   INTEGER NOT NULL,
   notified_at  INTEGER                        -- set by notifier (0008)
 );
+-- activity.payload keys per kind (all optional unless noted; amounts yocto strings):
+--   buy_filled:   token_id*, amount_in*, amount_out, tx_hash*
+--   buy_failed:   token_id*, amount_in, reason*, tx_hash
+--   buy_skipped:  token_id*, reason*  (reason codes from worker rules)
+--   storage_paid: token_id*, amount*
+--   gas_80:       vault_id*
+--   still_active: vault_id*
+--   sell:         token_id*, amount_in*, amount_out, tx_hash
+--   withdraw:     token_id*, amount*, tx_hash
+--   system:       text*
 CREATE INDEX IF NOT EXISTS activity_unnotified ON activity(notified_at) WHERE notified_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS telegram_links (
