@@ -12,6 +12,7 @@ from .types import Plan, Signal, User
 
 SCHEMA_PATH = pathlib.Path(__file__).with_name("schema.sql")
 IN_FLIGHT = ("planned", "sent")
+BUSY_TIMEOUT_MS = 10_000
 
 
 def now_ms() -> int:
@@ -19,11 +20,13 @@ def now_ms() -> int:
 
 
 def connect(path: str) -> sqlite3.Connection:
-    """Open the DB, apply the schema (idempotent). Autocommit; one connection may be shared under a lock."""
-    conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False, timeout=10)
+    """Open the DB, apply the schema (idempotent). Autocommit; one connection may be shared under a lock.
+    Every connection sets WAL (web and worker parts write the same file) and a busy timeout."""
+    conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False, timeout=BUSY_TIMEOUT_MS / 1000)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA journal_mode = WAL")  # ':memory:' stays 'memory'
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 10000")
     conn.executescript(SCHEMA_PATH.read_text())
     return conn
 

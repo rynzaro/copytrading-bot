@@ -7,6 +7,9 @@ copy_buys row before it queues the Plan. The executor never inserts; it only act
 DRY_RUN=1 (default): build and sign, don't send; log the would-be tx (no key material).
 Retry: resend while the price is within limits and the failure is a clear swap failure; then mark failed.
 An unknown outcome (timeout) is never resent: the row stays 'sent' so the token stays blocked.
+Reconciler (`reconcile`, run by `loop` at start and every `reconcile_s`): looks up each 'sent' row's tx by hash
+and settles it 'filled' / 'failed' from the outcome. It never signs or sends. Same thread as the plans, so it
+never races an in-flight wait.
 """
 from __future__ import annotations
 
@@ -22,8 +25,8 @@ from typing import Any
 from . import db as D
 from . import keys as K
 from . import route as R
+from .chain import RpcDown, RpcError
 from .db import now_ms
-from .nearrpc import RpcError
 from .types import Plan
 
 log = logging.getLogger("copytrade.executor")
@@ -65,6 +68,11 @@ def events(outcome: dict) -> list[dict]:
     return out
 
 
+def ambiguous_send_error(text: str) -> bool:
+    """send_tx error replies that don't prove the tx was rejected (it may still land)."""
+    return "TIMEOUT" in text.upper()
+
+
 def tx_failure(outcome: dict) -> str | None:
     st = outcome.get("status") or {}
     if "Failure" in st:
@@ -76,15 +84,41 @@ def tx_failure(outcome: dict) -> str | None:
     return None
 
 
+FINAL = {"SuccessValue", "SuccessReceiptId", "Failure"}
+
+
+def is_final(res: dict | None) -> bool:
+    st = res.get("status") if isinstance(res, dict) else None
+    return isinstance(st, dict) and bool(st.keys() & FINAL)
+
+
+def classify(res: dict) -> tuple[str, str | None]:
+    """Swap outcome -> ('filled', amount_out) | ('failed', reason) | ('unknown', None). Untrusted data."""
+    ev = [e for e in events(res) if e.get("event") == "swap_result"]
+    fail = tx_failure(res)
+    if ev and "amount_out" in ev[-1] and not ev[-1].get("error") and not fail:
+        try:
+            out = int(ev[-1]["amount_out"])
+        except (TypeError, ValueError):
+            return "unknown", None
+        return ("filled", str(out)) if out >= 0 else ("unknown", None)
+    if fail and "paused" in fail.lower():
+        return "failed", "paused"
+    if ev or fail:
+        return "failed", "swap_failed"
+    return "unknown", None  # success without our event: can't tell if tokens arrived
+
+
 class Executor:
     def __init__(self, db: sqlite3.Connection, rpc: Any, keystore: K.KeyStore, *, dry_run: bool | None = None,
                  max_attempts: int = 3, outcome_timeout_s: float = 60, poll_s: float = 1.0,
                  gas_allowance: int = GAS_ALLOWANCE, sleep: Callable[[float], None] = time.sleep,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic, reconcile_s: float = 60):
         self.db, self.rpc, self.ks = db, rpc, keystore
         self.dry_run = dry_run_default() if dry_run is None else dry_run
         self.max_attempts, self.timeout, self.poll = max_attempts, outcome_timeout_s, poll_s
         self.gas_allowance, self.sleep, self.clock = gas_allowance, sleep, clock
+        self.reconcile_s = reconcile_s
         self._gas_rearmed: dict[str, bool] = {}
 
     # ---- db ----
@@ -96,6 +130,11 @@ class Executor:
         sets = ", ".join(f"{k} = ?" for k in cols)
         self.db.execute(f"UPDATE copy_buys SET {sets} WHERE owner_id = ? AND token_id = ?",
                         (*cols.values(), plan.owner_id, plan.token_id))
+
+    def _status(self, plan: Plan) -> str | None:
+        r = self.db.execute("SELECT status FROM copy_buys WHERE owner_id = ? AND token_id = ?",
+                            (plan.owner_id, plan.token_id)).fetchone()
+        return r["status"] if r else None
 
     def claimed(self, plan: Plan) -> bool:
         """True when the (owner, token) row is 'planned' for this plan's signal (written by db.claim_copy_buy)."""
@@ -115,10 +154,10 @@ class Executor:
         while True:
             try:
                 res = self.rpc.tx_status(tx.hash, sender)
-            except RpcError as e:
+            except (RpcError, RpcDown) as e:
                 log.warning("tx_status %s: %s", tx.hash, e)
                 res = None
-            if res and (res.get("status") or {}).keys() & {"SuccessValue", "SuccessReceiptId", "Failure"}:
+            if res and is_final(res):
                 return res
             if self.clock() >= end:
                 return None
@@ -128,8 +167,12 @@ class Executor:
         tx = self._sign(key, plan, method, args, gas)
         try:
             self.rpc.send_tx(tx.base64)
+        except RpcDown:
+            return tx, None  # may have landed: caller treats as unknown, no resend
         except RpcError as e:
             t = e.text
+            if ambiguous_send_error(t):
+                return tx, None
             if "NotEnoughAllowance" in t:
                 raise Fail("gas_allowance") from None
             if "InvalidNonce" in t:
@@ -146,7 +189,7 @@ class Executor:
         try:
             ak = self.rpc.view_access_key(vault_id, public_key)
             allowance = ak["permission"]["FunctionCall"]["allowance"]
-        except (RpcError, KeyError, TypeError):
+        except (RpcError, RpcDown, KeyError, TypeError):
             return
         if allowance is None:
             return
@@ -164,7 +207,7 @@ class Executor:
     # ---- steps ----
     def ensure_registered(self, key: K.BotKey, plan: Plan) -> None:
         try:
-            bal = self.rpc.view(plan.token_id, "storage_balance_of", {"account_id": plan.vault_id})
+            bal = self.rpc.call_view(plan.token_id, "storage_balance_of", {"account_id": plan.vault_id})
         except RpcError:
             raise Fail("storage_check_failed") from None
         if bal is not None:
@@ -208,30 +251,31 @@ class Executor:
         self._update(plan, status="sent", min_out=str(mo), tx_hash=tx.hash)
         try:
             self.rpc.send_tx(tx.base64)
+            res = self._wait(tx, plan.vault_id)
+        except RpcDown:
+            res = None  # no endpoint answered the send: may have landed, never resend
         except RpcError as e:
             t = e.text
-            # Rejected by RPC: never on chain, safe to resend.
-            raise Fail("gas_allowance" if "NotEnoughAllowance" in t else "send_error",
-                       retry="NotEnoughAllowance" not in t) from None
-        res = self._wait(tx, plan.vault_id)
+            if ambiguous_send_error(t):
+                res = None
+            else:
+                # Rejected by RPC: never on chain, safe to resend.
+                raise Fail("gas_allowance" if "NotEnoughAllowance" in t else "send_error",
+                           retry="NotEnoughAllowance" not in t) from None
         self.check_gas(plan.owner_id, plan.vault_id, key.public_key)
         if res is None:
             log.warning("swap outcome unknown tx=%s owner=%s token=%s", tx.hash, plan.owner_id, plan.token_id)
             self._activity(plan.owner_id, "system", {"text": f"buy {plan.token_id}: outcome unknown, tx {tx.hash}"})
             return "sent"
-        ev = [e for e in events(res) if e.get("event") == "swap_result"]
-        fail = tx_failure(res)
-        if ev and "amount_out" in ev[-1] and not ev[-1].get("error") and not fail:
-            out = str(int(ev[-1]["amount_out"]))
-            self._update(plan, status="filled", amount_out=out, reason=None)
+        kind, val = classify(res)
+        if kind == "filled":
+            self._update(plan, status="filled", amount_out=val, reason=None)
             self._activity(plan.owner_id, "buy_filled", {"token_id": plan.token_id, "amount_in": str(amount_in),
-                                                         "amount_out": out, "tx_hash": tx.hash})
+                                                         "amount_out": val, "tx_hash": tx.hash})
             return "filled"
-        if fail and "paused" in fail.lower():
-            raise Fail("paused")
-        if ev or fail:
-            raise Fail("swap_failed", retry=True)
-        # Success without our event: can't tell if tokens arrived. Don't resend.
+        if kind == "failed":
+            raise Fail(val or "swap_failed", retry=val != "paused")
+        # Can't tell if tokens arrived. Don't resend.
         self._activity(plan.owner_id, "system", {"text": f"buy {plan.token_id}: no swap_result, tx {tx.hash}"})
         return "sent"
 
@@ -266,6 +310,10 @@ class Executor:
             raise Fail(reason)
         except Fail as f:
             return self._fail(plan, f.reason, last_tx)
+        except RpcDown:
+            if self._status(plan) == "sent":
+                return "sent"  # a tx is out: leave it to the reconciler
+            return self._fail(plan, "rpc_down", last_tx)
         except (FileNotFoundError, ValueError):
             return self._fail(plan, "no_bot_key", last_tx)
 
@@ -277,10 +325,60 @@ class Executor:
         self._activity(plan.owner_id, "buy_failed", p)
         return "failed"
 
+    # ---- reconciler ----
+    def reconcile(self) -> int:
+        """Settle 'sent' rows from their tx outcome (by hash, sender = vault). Never sends. Returns rows settled."""
+        rows = self.db.execute(
+            "SELECT b.owner_id, b.token_id, b.amount_in, b.tx_hash, u.vault_id FROM copy_buys b"
+            " JOIN users u ON u.owner_id = b.owner_id"
+            " WHERE b.status = 'sent' AND b.tx_hash IS NOT NULL AND u.vault_id IS NOT NULL ORDER BY b.updated_at"
+        ).fetchall()
+        n = 0
+        for r in rows:
+            try:
+                res = self.rpc.tx_status(r["tx_hash"], r["vault_id"])
+            except (RpcError, RpcDown) as e:
+                log.warning("reconcile tx_status %s: %s", r["tx_hash"], e)
+                continue
+            if not res or not is_final(res):
+                continue
+            kind, val = classify(res)
+            if kind == "unknown":
+                log.info("reconcile: outcome without verdict tx=%s owner=%s token=%s", r["tx_hash"], r["owner_id"],
+                         r["token_id"])
+                continue
+            cols = ("filled", val, None) if kind == "filled" else ("failed", None, val)
+            cur = self.db.execute(
+                "UPDATE copy_buys SET status = ?, amount_out = coalesce(?, amount_out), reason = ?, updated_at = ?"
+                " WHERE owner_id = ? AND token_id = ? AND status = 'sent' AND tx_hash = ?",
+                (*cols, now_ms(), r["owner_id"], r["token_id"], r["tx_hash"]),
+            )
+            if cur.rowcount != 1:
+                continue
+            n += 1
+            base = {"token_id": r["token_id"], "amount_in": r["amount_in"]}
+            if kind == "filled":
+                self._activity(r["owner_id"], "buy_filled", {**base, "amount_out": val, "tx_hash": r["tx_hash"]})
+            else:
+                self._activity(r["owner_id"], "buy_failed", {**base, "reason": val, "tx_hash": r["tx_hash"]})
+            log.info("reconciled tx=%s owner=%s token=%s -> %s", r["tx_hash"], r["owner_id"], r["token_id"], kind)
+        return n
+
     def loop(self, q: queue.Queue[Any]) -> None:
-        """Consume plans one at a time (nonce safety). None stops the loop."""
+        """Consume plans one at a time (nonce safety). None stops the loop. Reconciles at start and every
+        reconcile_s between plans."""
+        next_rec = time.monotonic()
         while True:
-            plan = q.get()
+            if time.monotonic() >= next_rec:
+                try:
+                    self.reconcile()
+                except Exception:
+                    log.exception("reconcile error")
+                next_rec = time.monotonic() + self.reconcile_s
+            try:
+                plan = q.get(timeout=max(0.0, next_rec - time.monotonic()))
+            except queue.Empty:
+                continue
             if plan is None:
                 return
             try:

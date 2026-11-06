@@ -7,8 +7,8 @@ the executor only advances that row.
 
 Entry point (DRY_RUN=1 default: signs, never sends):
     DATA_DIR=/tmp/ctw python -m copytrade_worker
-Env: DATA_DIR, DRY_RUN, NEAR_RPC_URL, WORKER_PORT (API, default 8700), NTFY_URL, TELEGRAM_BOT_TOKEN, HOST_NTFY_TOPIC,
-HOST_TELEGRAM_CHAT_ID.
+Env: DATA_DIR, DRY_RUN, RPC_URLS (or NEAR_RPC_URL), VAULT_CODE_HASH, WORKER_PORT (API, default 8700), NTFY_URL,
+TELEGRAM_BOT_TOKEN, HOST_NTFY_TOPIC, HOST_TELEGRAM_CHAT_ID.
 """
 
 from __future__ import annotations
@@ -16,9 +16,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,7 +29,6 @@ from .api import App, serve
 from .chain import Chain
 from .executor import Executor
 from .keys import KeyStore
-from .nearrpc import Rpc
 from .notify.config import Config as NotifyConfig
 from .notify.loop import Notifier
 from .signals import Pipeline
@@ -90,6 +91,31 @@ class Worker:
         self.api.shutdown()
 
 
+B58_HASH = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}")
+
+
+def startup_errors(env: Mapping[str, str]) -> list[str]:
+    """With DRY_RUN=0 (live): the config a live worker needs. Messages name variables, never values."""
+    if env.get("DRY_RUN", "1") != "0":
+        return []
+    errs = []
+    if not B58_HASH.fullmatch((env.get("VAULT_CODE_HASH") or "").strip()):
+        errs.append("VAULT_CODE_HASH missing or not a base58 code hash")
+    raw = env.get("RPC_URLS") or env.get("NEAR_RPC_URL") or ""
+    urls = [u.strip() for u in raw.split(",") if u.strip()]
+    if not urls or not all(u.startswith(("https://", "http://")) for u in urls):
+        errs.append("RPC_URLS (or NEAR_RPC_URL) missing or not http(s) URLs")
+    if not (env.get("DATA_DIR") or "").strip():
+        errs.append("DATA_DIR missing (no ./data fallback when live)")
+    return errs
+
+
+def check_startup(env: Mapping[str, str] | None = None) -> None:
+    errs = startup_errors(os.environ if env is None else env)
+    if errs:
+        raise SystemExit("refusing to start with DRY_RUN=0: " + "; ".join(errs))
+
+
 def data_dir() -> str:
     d = os.environ.get("DATA_DIR") or "./data"
     os.makedirs(d, exist_ok=True)
@@ -99,16 +125,18 @@ def data_dir() -> str:
 def run(
     path: str | None = None,
     chain: Chain | None = None,
-    rpc: Any = None,
+    rpc: Chain | None = None,
     api_port: int | None = None,
     notify_config: NotifyConfig | None = None,
     stop: threading.Event | None = None,
 ) -> Worker:
-    """Start everything in daemon threads. Each part gets its own connection to the same DB file."""
+    """Start everything in daemon threads. Each part gets its own connection to the same DB file.
+    Refuses (SystemExit) with DRY_RUN=0 unless VAULT_CODE_HASH, RPC URLs and DATA_DIR are set."""
+    check_startup()
     data = data_dir()
     path = path or os.path.join(data, "worker.db")
     sig = start(db.connect(path), chain=chain, stop=stop)
-    rpc = rpc or Rpc()
+    rpc = rpc or Chain()  # own instance: executor latency not queued behind signal-side reads
     ks = KeyStore(data)
     ex = Executor(db.connect(path), rpc, ks)
     log("executor_start", dry_run=ex.dry_run)

@@ -4,7 +4,7 @@ from __future__ import annotations
 import base64
 import json
 
-from copytrade_worker.nearrpc import RpcError
+from copytrade_worker.chain import RpcDown, RpcError
 from copytrade_worker.route import DCL, REF_V1
 
 
@@ -32,9 +32,17 @@ class FakeRpc:
         self.outcomes: list = []        # popped per tx_status call for a new hash; dict, None (pending), or callable
         self.send_errors: list = []     # popped per send_tx: None = ok, else error object
         self.views = 0
+        self.status_calls: list[tuple[str, str]] = []
+        self.down: set[str] = set()     # method names that raise RpcDown (no endpoint answered)
+        self.url = "http://rpc.test"
         self._res: dict[str, object] = {}
 
-    def view(self, account, method, args):
+    def _maybe_down(self, name):
+        if name in self.down:
+            raise RpcDown(name)
+
+    def call_view(self, account, method, args):
+        self._maybe_down("call_view")
         self.views += 1
         if account == DCL and method == "get_pool":
             return self.dcl.get(args["pool_id"])
@@ -51,13 +59,17 @@ class FakeRpc:
         raise RpcError(f"unknown view {account}.{method}")
 
     def view_access_key(self, account, public_key):
+        self._maybe_down("view_access_key")
         return self.access
 
     def block_hash(self):
+        self._maybe_down("block_hash")
         return "11111111111111111111111111111111"
 
     def send_tx(self, b64):
         err = self.send_errors.pop(0) if self.send_errors else None
+        if isinstance(err, Exception):
+            raise err
         if err is not None:
             raise RpcError(err)
         raw = base64.b64decode(b64)
@@ -65,6 +77,8 @@ class FakeRpc:
         return "h"
 
     def tx_status(self, tx_hash, sender):
+        self._maybe_down("tx_status")
+        self.status_calls.append((tx_hash, sender))
         if tx_hash not in self._res:
             o = self.outcomes.pop(0) if self.outcomes else outcome()
             self._res[tx_hash] = o

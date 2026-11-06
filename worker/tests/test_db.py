@@ -111,3 +111,22 @@ def test_activity_and_launch_tax(conn):
     assert db.get_launch_tax(conn, "t") is None
     db.put_launch_tax(conn, "t", "hash", True, now=9)
     assert db.get_launch_tax(conn, "t") == {"token_id": "t", "code_hash": "hash", "sniping_tax": True, "checked_at": 9}
+
+
+def test_every_connection_wal_and_busy_timeout(tmp_path):
+    p = str(tmp_path / "w.db")
+    for _ in range(2):   # first open creates the file, second opens an existing one
+        c = db.connect(p)
+        assert c.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert c.execute("PRAGMA busy_timeout").fetchone()[0] == db.BUSY_TIMEOUT_MS
+        assert c.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+
+def test_wal_lets_reader_see_writer_without_lock(tmp_path):
+    p = str(tmp_path / "w.db")
+    w, r = db.connect(p), db.connect(p)
+    w.execute("BEGIN")
+    w.execute("INSERT INTO launch_tax(token_id, sniping_tax, checked_at) VALUES ('t', 0, 1)")
+    assert r.execute("SELECT count(*) FROM launch_tax").fetchone()[0] == 0   # WAL: reader not blocked
+    w.execute("COMMIT")
+    assert r.execute("SELECT count(*) FROM launch_tax").fetchone()[0] == 1

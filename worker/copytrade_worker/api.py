@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from . import keys as K
-from .nearrpc import RpcError
+from .chain import RpcError
 
 log = logging.getLogger("copytrade.api")
 MAX_BODY = 4096
@@ -46,7 +46,7 @@ class App:
             return 404, {"error": "unknown owner or no bot key"}
         pk = row["bot_public_key"]
         try:
-            st = self.rpc.view(vault, "get_state", {})
+            st = self.rpc.call_view(vault, "get_state", {})
         except (RpcError, OSError, ValueError):
             return 502, {"error": "rpc"}
         if not isinstance(st, dict) or st.get("owner_id") != owner:

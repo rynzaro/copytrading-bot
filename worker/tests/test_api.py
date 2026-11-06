@@ -97,6 +97,14 @@ def test_vault_confirmed_rejects(srv):
     assert db.execute("SELECT vault_id FROM users").fetchone()[0] is None
 
 
+def test_vault_confirmed_rpc_down_is_502(srv):
+    base, db, rpc = srv[0], srv[1], srv[2]
+    confirmed_setup(srv)
+    rpc.down = {"call_view"}
+    assert call(base, "/vault-confirmed", {"owner_id": OWNER, "vault_id": VAULT}) == (502, {"error": "rpc"})
+    assert db.execute("SELECT vault_id FROM users").fetchone()[0] is None
+
+
 def test_health(srv):
     base, db = srv[0], srv[1]
     db.execute("INSERT INTO signals (target_id, token_id, kind, tx_hash, seen_at, source)"
