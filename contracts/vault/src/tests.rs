@@ -1,0 +1,443 @@
+#![allow(unused_must_use)]
+use super::*;
+use near_sdk::test_utils::{get_logs, VMContextBuilder};
+use near_sdk::{testing_env, NearToken};
+
+const VAULT: &str = "bot.alice.near";
+const OWNER: &str = "alice.near";
+const MEME: &str = "meme.tkn.near";
+const BOT_PK: &str = "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp";
+const OTHER_PK: &str = "ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847";
+
+fn acc(s: &str) -> AccountId {
+    s.parse().unwrap()
+}
+
+fn pk(s: &str) -> PublicKey {
+    s.parse().unwrap()
+}
+
+fn ctx(predecessor: &str, signer_pk: &str, deposit: u128) {
+    testing_env!(VMContextBuilder::new()
+        .current_account_id(acc(VAULT))
+        .predecessor_account_id(acc(predecessor))
+        .signer_account_id(acc(predecessor))
+        .signer_account_pk(pk(signer_pk))
+        .account_balance(NearToken::from_near(20))
+        .attached_deposit(NearToken::from_yoctonear(deposit))
+        .build());
+}
+
+fn vault() -> Vault {
+    ctx(OWNER, OTHER_PK, 0);
+    let mut v = Vault::new(acc(OWNER));
+    v.bot_key = Some(pk(BOT_PK));
+    v
+}
+
+fn hop(pool: &str, i: &str, o: &str) -> Hop {
+    Hop { pool_id: pool.into(), token_in: acc(i), token_out: acc(o) }
+}
+
+fn buy_dcl() -> SwapArgs {
+    SwapArgs {
+        venue: Venue::Dcl,
+        hops: vec![hop(&format!("{MEME}|{WRAP}|2000"), WRAP, MEME)],
+        amount_in: U128(10),
+        min_out: U128(1),
+    }
+}
+
+fn buy_ref_via_rhea() -> SwapArgs {
+    SwapArgs {
+        venue: Venue::RefV1,
+        hops: vec![hop("12", WRAP, RHEA), hop("4021", RHEA, MEME)],
+        amount_in: U128(10),
+        min_out: U128(7),
+    }
+}
+
+fn err(args: &SwapArgs, side: Side) -> String {
+    validate(args, side).unwrap_err()
+}
+
+// ---------------- rules ----------------
+
+#[test]
+fn valid_buys_pass() {
+    validate(&buy_dcl(), Side::Buy).unwrap();
+    validate(&buy_ref_via_rhea(), Side::Buy).unwrap();
+    let mut a = buy_dcl();
+    a.hops = vec![hop(&format!("{WRAP}|{RHEA}|100"), WRAP, RHEA), hop(&format!("{RHEA}|{MEME}|2000"), RHEA, MEME)];
+    validate(&a, Side::Buy).unwrap();
+}
+
+#[test]
+fn min_out_zero_rejected() {
+    let mut a = buy_dcl();
+    a.min_out = U128(0);
+    assert!(err(&a, Side::Buy).contains("min_out"));
+}
+
+#[test]
+fn amount_zero_rejected() {
+    let mut a = buy_dcl();
+    a.amount_in = U128(0);
+    assert!(err(&a, Side::Buy).contains("amount_in"));
+}
+
+#[test]
+fn buy_must_start_with_wnear() {
+    let mut a = buy_ref_via_rhea();
+    a.hops = vec![hop("4021", RHEA, MEME)];
+    assert!(err(&a, Side::Buy).contains("start with"));
+    // a sell shaped request through swap is a buy that doesn't start with wNEAR
+    let s = SwapArgs { venue: Venue::RefV1, hops: vec![hop("9", MEME, WRAP)], amount_in: U128(5), min_out: U128(1) };
+    assert!(err(&s, Side::Buy).contains("start with"));
+}
+
+#[test]
+fn denylisted_output_rejected() {
+    for t in [
+        "usdt.tether-token.near",
+        "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "linear-protocol.near",
+        RHEA,
+        "token.burrow.near",
+        "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48.factory.bridge.near",
+        "eth.omft.near",
+        "nbtc.bridge.near",
+    ] {
+        let a = SwapArgs { venue: Venue::RefV1, hops: vec![hop("1", WRAP, t)], amount_in: U128(1), min_out: U128(1) };
+        assert!(err(&a, Side::Buy).contains("denylist"), "{t}");
+    }
+    assert!(!is_denylisted(MEME));
+    assert!(!is_denylisted("bridge.near.meme.near"));
+}
+
+#[test]
+fn bad_intermediate_rejected() {
+    let a = SwapArgs {
+        venue: Venue::RefV1,
+        hops: vec![hop("1", WRAP, "usdt.tether-token.near"), hop("2", "usdt.tether-token.near", MEME)],
+        amount_in: U128(1),
+        min_out: U128(1),
+    };
+    assert!(err(&a, Side::Buy).contains("intermediate"));
+    let b = SwapArgs {
+        venue: Venue::RefV1,
+        hops: vec![hop("1", WRAP, "other.meme.near"), hop("2", "other.meme.near", MEME)],
+        amount_in: U128(1),
+        min_out: U128(1),
+    };
+    assert!(err(&b, Side::Buy).contains("intermediate"));
+}
+
+#[test]
+fn hop_count_and_chain() {
+    let mut a = buy_dcl();
+    a.hops.clear();
+    assert!(err(&a, Side::Buy).contains("hops"));
+    let a = SwapArgs {
+        venue: Venue::RefV1,
+        hops: vec![hop("1", WRAP, RHEA), hop("2", RHEA, WRAP), hop("3", WRAP, RHEA), hop("4", RHEA, MEME)],
+        amount_in: U128(1),
+        min_out: U128(1),
+    };
+    assert!(err(&a, Side::Buy).contains("hops"));
+    let a = SwapArgs {
+        venue: Venue::RefV1,
+        hops: vec![hop("1", WRAP, RHEA), hop("2", WRAP, MEME)],
+        amount_in: U128(1),
+        min_out: U128(1),
+    };
+    assert!(err(&a, Side::Buy).contains("chain"));
+    let a = SwapArgs {
+        venue: Venue::RefV1,
+        hops: vec![hop("1", WRAP, RHEA), hop("2", RHEA, WRAP), hop("3", WRAP, MEME)],
+        amount_in: U128(1),
+        min_out: U128(1),
+    };
+    assert!(err(&a, Side::Buy).contains("repeats"));
+}
+
+#[test]
+fn pool_id_format() {
+    let mut a = buy_dcl();
+    for bad in ["7", "a|b|2000", &format!("{MEME}|{WRAP}"), &format!("{MEME}|{WRAP}|x"), &format!("{RHEA}|{WRAP}|2000")]
+    {
+        a.hops[0].pool_id = bad.to_string();
+        assert!(err(&a, Side::Buy).contains("dcl pool_id"), "{bad}");
+    }
+    a.hops[0].pool_id = format!("{WRAP}|{MEME}|2000"); // either order
+    validate(&a, Side::Buy).unwrap();
+    let mut r = buy_ref_via_rhea();
+    for bad in ["", "-1", "01", "1.5", &format!("{WRAP}|{RHEA}|100"), "99999999999999999999"] {
+        r.hops[0].pool_id = bad.to_string();
+        assert!(err(&r, Side::Buy).contains("ref_v1 pool_id"), "{bad}");
+    }
+}
+
+#[test]
+fn unknown_venue_rejected_by_json() {
+    let j = r#"{"venue":"intear","hops":[{"pool_id":"1","token_in":"wrap.near","token_out":"meme.near"}],"amount_in":"1","min_out":"1"}"#;
+    assert!(serde_json::from_str::<SwapArgs>(j).is_err());
+    let j = r#"{"venue":"dcl","hops":[],"amount_in":"1","min_out":"1","msg":"x"}"#;
+    assert!(serde_json::from_str::<SwapArgs>(j).is_err(), "no raw msg field");
+    assert_eq!(Venue::Dcl.receiver().as_str(), "dclv2.ref-labs.near");
+    assert_eq!(Venue::RefV1.receiver().as_str(), "v2.ref-finance.near");
+}
+
+#[test]
+fn sell_rules() {
+    let s = SwapArgs { venue: Venue::RefV1, hops: vec![hop("9", MEME, WRAP)], amount_in: U128(5), min_out: U128(1) };
+    validate(&s, Side::Sell).unwrap();
+    let s2 = SwapArgs { venue: Venue::RefV1, hops: vec![hop("9", MEME, RHEA)], amount_in: U128(5), min_out: U128(1) };
+    assert!(err(&s2, Side::Sell).contains("end with"));
+    // sell may sell a non-meme too (owner's choice)
+    let s3 = SwapArgs {
+        venue: Venue::RefV1,
+        hops: vec![hop("9", "usdt.tether-token.near", WRAP)],
+        amount_in: U128(5),
+        min_out: U128(1),
+    };
+    validate(&s3, Side::Sell).unwrap();
+}
+
+#[test]
+fn dcl_msg_shape() {
+    let m: Value = serde_json::from_str(&build_msg(&buy_dcl())).unwrap();
+    assert_eq!(
+        m,
+        serde_json::json!({"Swap": {"pool_ids": [format!("{MEME}|{WRAP}|2000")], "output_token": MEME,
+            "min_output_amount": "1", "skip_unwrap_near": true}})
+    );
+}
+
+#[test]
+fn ref_msg_shape() {
+    let m: Value = serde_json::from_str(&build_msg(&buy_ref_via_rhea())).unwrap();
+    assert_eq!(
+        m,
+        serde_json::json!({"force": 0, "skip_unwrap_near": true, "actions": [
+            {"pool_id": 12, "token_in": WRAP, "token_out": RHEA, "amount_in": "10", "min_amount_out": "0"},
+            {"pool_id": 4021, "token_in": RHEA, "token_out": MEME, "min_amount_out": "7"}]})
+    );
+}
+
+#[test]
+fn denylist_matches_worker_copy() {
+    // worker/copytrade_worker/denylist.json is the source (ticket 0005). Skip if not there yet.
+    let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../../worker/copytrade_worker/denylist.json");
+    let Ok(worker) = std::fs::read_to_string(p) else { return };
+    let ours = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/denylist.json")).unwrap();
+    let keys = |s: &str, k: &str| -> Vec<String> {
+        let v: Value = serde_json::from_str(s).unwrap();
+        let mut ks: Vec<String> = v[k].as_object().unwrap().keys().cloned().collect();
+        ks.sort();
+        ks
+    };
+    for k in ["exact", "suffix"] {
+        assert_eq!(keys(&worker, k), keys(&ours, k), "denylist {k} out of sync with worker");
+    }
+}
+
+// ---------------- access ----------------
+
+#[test]
+#[should_panic(expected = "caller must be owner_id")]
+fn new_only_by_owner() {
+    ctx("mallory.near", OTHER_PK, 0);
+    Vault::new(acc(OWNER));
+}
+
+#[test]
+fn state_after_new() {
+    let v = vault();
+    let s = v.get_state();
+    assert_eq!(s.owner_id, acc(OWNER));
+    assert!(!s.paused);
+    assert_eq!(s.bot_key.as_deref(), Some(BOT_PK));
+    assert_eq!(s.version, "1.0.0");
+}
+
+#[test]
+fn bot_swap_accepted() {
+    let mut v = vault();
+    ctx(VAULT, BOT_PK, 0);
+    v.swap(buy_dcl());
+    let logs = get_logs();
+    assert!(logs[0].starts_with("EVENT_JSON:"));
+    let e: Value = serde_json::from_str(&logs[0]["EVENT_JSON:".len()..]).unwrap();
+    assert_eq!(e["standard"], "copytrade_vault");
+    assert_eq!(e["version"], "1.0.0");
+    assert_eq!(e["event"], "swap");
+    assert_eq!(e["data"]["token_out"], MEME);
+    assert_eq!(e["data"]["venue"], "dcl");
+}
+
+#[test]
+#[should_panic(expected = "only the bot key")]
+fn swap_from_stranger() {
+    let mut v = vault();
+    ctx("mallory.near", BOT_PK, 0);
+    v.swap(buy_dcl());
+}
+
+#[test]
+#[should_panic(expected = "only the bot key")]
+fn swap_from_owner_is_not_bot() {
+    let mut v = vault();
+    ctx(OWNER, BOT_PK, 0);
+    v.swap(buy_dcl());
+}
+
+#[test]
+#[should_panic(expected = "only the bot key")]
+fn swap_from_stale_key() {
+    let mut v = vault();
+    ctx(VAULT, OTHER_PK, 0);
+    v.swap(buy_dcl());
+}
+
+#[test]
+#[should_panic(expected = "only the bot key")]
+fn swap_after_key_removed() {
+    let mut v = vault();
+    ctx(OWNER, OTHER_PK, 1);
+    v.remove_bot_key();
+    ctx(VAULT, BOT_PK, 0);
+    v.swap(buy_dcl());
+}
+
+#[test]
+#[should_panic(expected = "paused")]
+fn swap_when_paused() {
+    let mut v = vault();
+    ctx(OWNER, OTHER_PK, 1);
+    v.pause();
+    ctx(VAULT, BOT_PK, 0);
+    v.swap(buy_dcl());
+}
+
+#[test]
+#[should_panic(expected = "paused")]
+fn register_when_paused() {
+    let mut v = vault();
+    ctx(OWNER, OTHER_PK, 1);
+    v.pause();
+    ctx(VAULT, BOT_PK, 0);
+    v.register_token(acc(MEME));
+}
+
+#[test]
+#[should_panic(expected = "min_out")]
+fn swap_min_out_zero_panics() {
+    let mut v = vault();
+    ctx(VAULT, BOT_PK, 0);
+    let mut a = buy_dcl();
+    a.min_out = U128(0);
+    v.swap(a);
+}
+
+/// Every owner method, called by the bot (self) or a stranger, panics.
+#[test]
+fn owner_methods_reject_non_owner() {
+    type Call = fn(&mut Vault);
+    let calls: Vec<(&str, Call)> = vec![
+        ("sell", |v| {
+            v.sell(SwapArgs {
+                venue: Venue::RefV1,
+                hops: vec![hop("9", MEME, WRAP)],
+                amount_in: U128(5),
+                min_out: U128(1),
+            });
+        }),
+        ("withdraw_near", |v| {
+            v.withdraw_near(None);
+        }),
+        ("withdraw_token", |v| {
+            v.withdraw_token(acc(MEME), None);
+        }),
+        ("pause", |v| v.pause()),
+        ("unpause", |v| v.unpause()),
+        ("set_bot_key", |v| {
+            v.set_bot_key(pk(OTHER_PK), U128(1));
+        }),
+        ("remove_bot_key", |v| {
+            v.remove_bot_key();
+        }),
+        ("owner_upgrade", |v| {
+            v.owner_upgrade(Base58CryptoHash::from([7u8; 32]));
+        }),
+    ];
+    for (name, f) in calls {
+        for (who, dep) in [(VAULT, 1), (VAULT, 0), ("mallory.near", 1), (WRAP, 1), (DCL, 1)] {
+            let mut v = vault();
+            ctx(who, BOT_PK, dep);
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut v)));
+            assert!(r.is_err(), "{name} by {who} must panic");
+        }
+        // owner without exactly 1 yocto (FC key can't attach deposit)
+        for dep in [0, 2] {
+            let mut v = vault();
+            ctx(OWNER, OTHER_PK, dep);
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut v)));
+            assert!(r.is_err(), "{name} by owner with {dep} yocto must panic");
+        }
+    }
+}
+
+#[test]
+fn owner_methods_work() {
+    let mut v = vault();
+    ctx(OWNER, OTHER_PK, 1);
+    v.pause();
+    assert!(v.get_state().paused);
+    v.unpause();
+    assert!(!v.get_state().paused);
+    v.withdraw_near(Some(U128(5)));
+    v.withdraw_token(acc(MEME), Some(U128(5)));
+    v.withdraw_token(acc(MEME), None);
+    v.sell(SwapArgs {
+        venue: Venue::Dcl,
+        hops: vec![hop(&format!("{MEME}|{WRAP}|2000"), MEME, WRAP)],
+        amount_in: U128(5),
+        min_out: U128(1),
+    });
+    v.set_bot_key(pk(OTHER_PK), U128(10u128.pow(24)));
+    assert_eq!(v.get_state().bot_key, None, "old key loses power before the new one lands");
+    v.owner_upgrade(Base58CryptoHash::from([7u8; 32]));
+}
+
+#[test]
+fn sell_works_while_paused() {
+    let mut v = vault();
+    ctx(OWNER, OTHER_PK, 1);
+    v.pause();
+    v.sell(SwapArgs { venue: Venue::RefV1, hops: vec![hop("9", MEME, WRAP)], amount_in: U128(5), min_out: U128(1) });
+}
+
+#[test]
+#[should_panic(expected = "allowance must be > 0")]
+fn bot_key_zero_allowance() {
+    let mut v = vault();
+    ctx(OWNER, OTHER_PK, 1);
+    v.set_bot_key(pk(OTHER_PK), U128(0));
+}
+
+#[test]
+#[should_panic]
+fn callbacks_are_private() {
+    let mut v = vault();
+    ctx("mallory.near", BOT_PK, 0);
+    v.on_bot_key_set(pk(OTHER_PK), U128(1));
+}
+
+#[test]
+#[should_panic]
+fn unwrap_callback_private() {
+    let mut v = vault();
+    ctx(OWNER, OTHER_PK, 0);
+    v.on_unwrapped(U128(1));
+}
