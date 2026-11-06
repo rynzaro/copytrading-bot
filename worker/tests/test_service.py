@@ -97,3 +97,42 @@ def test_health_and_notifier_running(worker):
     assert h["rpc"] == "http://rpc.test" and set(h["feeds"]) == set(feeds.NAMES) and h["last_signal_at"] is None
     alive = {t.name for t in threading.enumerate() if t.is_alive()}
     assert {"notify", "executor"} <= alive
+
+
+LIVE_OK = {"DRY_RUN": "0", "VAULT_CODE_HASH": "8kPzWhcBXaQX3rUJzNJo2U8KcU9xUZoTT3qQKcVN3r3H",
+           "RPC_URLS": "https://rpc.a,https://rpc.b", "DATA_DIR": "/data"}
+
+
+def test_startup_checks_only_when_live():
+    assert service.startup_errors({}) == []                       # DRY_RUN unset: dry run
+    assert service.startup_errors({"DRY_RUN": "1"}) == []
+    assert service.startup_errors(LIVE_OK) == []
+    assert service.startup_errors({**LIVE_OK, "RPC_URLS": "", "NEAR_RPC_URL": "https://one"}) == []
+
+
+@pytest.mark.parametrize("change,name", [
+    ({"VAULT_CODE_HASH": ""}, "VAULT_CODE_HASH"),
+    ({"VAULT_CODE_HASH": "not a hash!"}, "VAULT_CODE_HASH"),
+    ({"RPC_URLS": " , "}, "RPC_URLS"),
+    ({"RPC_URLS": "ftp://x"}, "RPC_URLS"),
+    ({"DATA_DIR": ""}, "DATA_DIR"),
+])
+def test_startup_checks_name_what_is_missing(change, name):
+    env = {**LIVE_OK, **change}
+    errs = service.startup_errors(env)
+    assert len(errs) == 1 and name in errs[0]
+    for v in change.values():
+        if v.strip():
+            assert v not in errs[0]   # names only, never values
+
+
+def test_run_refuses_live_without_config(tmp_path, monkeypatch):
+    for k in ("VAULT_CODE_HASH", "RPC_URLS", "NEAR_RPC_URL", "DATA_DIR"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as e:
+        service.run(chain=FakeChain(), rpc=FakeRpc(), api_port=0)
+    msg = str(e.value)
+    assert "DRY_RUN=0" in msg and "VAULT_CODE_HASH" in msg and "RPC_URLS" in msg and "DATA_DIR" in msg
+    assert not (tmp_path / "data").exists()   # refused before touching disk

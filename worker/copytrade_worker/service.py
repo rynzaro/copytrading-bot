@@ -16,9 +16,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -89,6 +91,31 @@ class Worker:
         self.api.shutdown()
 
 
+B58_HASH = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}")
+
+
+def startup_errors(env: Mapping[str, str]) -> list[str]:
+    """With DRY_RUN=0 (live): the config a live worker needs. Messages name variables, never values."""
+    if env.get("DRY_RUN", "1") != "0":
+        return []
+    errs = []
+    if not B58_HASH.fullmatch((env.get("VAULT_CODE_HASH") or "").strip()):
+        errs.append("VAULT_CODE_HASH missing or not a base58 code hash")
+    raw = env.get("RPC_URLS") or env.get("NEAR_RPC_URL") or ""
+    urls = [u.strip() for u in raw.split(",") if u.strip()]
+    if not urls or not all(u.startswith(("https://", "http://")) for u in urls):
+        errs.append("RPC_URLS (or NEAR_RPC_URL) missing or not http(s) URLs")
+    if not (env.get("DATA_DIR") or "").strip():
+        errs.append("DATA_DIR missing (no ./data fallback when live)")
+    return errs
+
+
+def check_startup(env: Mapping[str, str] | None = None) -> None:
+    errs = startup_errors(os.environ if env is None else env)
+    if errs:
+        raise SystemExit("refusing to start with DRY_RUN=0: " + "; ".join(errs))
+
+
 def data_dir() -> str:
     d = os.environ.get("DATA_DIR") or "./data"
     os.makedirs(d, exist_ok=True)
@@ -103,7 +130,9 @@ def run(
     notify_config: NotifyConfig | None = None,
     stop: threading.Event | None = None,
 ) -> Worker:
-    """Start everything in daemon threads. Each part gets its own connection to the same DB file."""
+    """Start everything in daemon threads. Each part gets its own connection to the same DB file.
+    Refuses (SystemExit) with DRY_RUN=0 unless VAULT_CODE_HASH, RPC URLs and DATA_DIR are set."""
+    check_startup()
     data = data_dir()
     path = path or os.path.join(data, "worker.db")
     sig = start(db.connect(path), chain=chain, stop=stop)
