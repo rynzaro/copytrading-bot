@@ -2,6 +2,7 @@
 
 import json
 import logging
+import threading
 import time
 
 from .channels import Ntfy, Telegram
@@ -62,7 +63,8 @@ class Notifier:
         if topic:
             out.append(("ntfy", lambda text, t=topic: self.ntfy.send(t, text)))
         if chat and self.tg is not None:
-            out.append(("telegram", lambda text, c=chat: self.tg.send(c, text)))
+            tg = self.tg
+            out.append(("telegram", lambda text, c=chat: tg.send(c, text)))
         return out
 
     def _mark(self, aid: int) -> None:
@@ -162,11 +164,15 @@ class Notifier:
         self.weekly_still_active()
         self.deliver_pending()
 
-    def run_forever(self) -> None:
+    def run_forever(self, stop: threading.Event | None = None) -> None:
+        """Loop until `stop` is set (forever without one)."""
         log.info("notify loop start %s", self.cfg)
-        while True:
+        while stop is None or not stop.is_set():
             try:
                 self.run_once()
             except Exception as e:  # keep the loop alive; no secrets in type name
                 log.exception("notify loop error: %s", type(e).__name__)
-            self.sleep(self.cfg.interval_s)
+            if stop is None:
+                self.sleep(self.cfg.interval_s)
+            else:
+                stop.wait(self.cfg.interval_s)

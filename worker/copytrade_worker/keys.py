@@ -53,7 +53,8 @@ def _str(s: str) -> bytes:
 def function_call(method: str, args: dict | bytes, gas: int, deposit: int = 0) -> bytes:
     """Borsh Action::FunctionCall (enum index 2)."""
     raw = args if isinstance(args, bytes) else json.dumps(args, separators=(",", ":")).encode()
-    return b"\x02" + _str(method) + struct.pack("<I", len(raw)) + raw + struct.pack("<Q", gas) + deposit.to_bytes(16, "little")
+    head = b"\x02" + _str(method) + struct.pack("<I", len(raw)) + raw
+    return head + struct.pack("<Q", gas) + deposit.to_bytes(16, "little")
 
 
 def transaction(signer_id: str, public_key: bytes, nonce: int, receiver_id: str, block_hash: bytes,
@@ -93,7 +94,9 @@ class SignedTx:
     receiver_id: str
 
 
-def sign_tx(key: BotKey, signer_id: str, nonce: int, receiver_id: str, block_hash: str, actions: list[bytes]) -> SignedTx:
+def sign_tx(
+    key: BotKey, signer_id: str, nonce: int, receiver_id: str, block_hash: str, actions: list[bytes]
+) -> SignedTx:
     raw = transaction(signer_id, key.public_bytes, nonce, receiver_id, b58d(block_hash), actions)
     h = hashlib.sha256(raw).digest()
     signed = raw + b"\x00" + key.sign(h)

@@ -1,19 +1,15 @@
 import json
-import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 import pytest
 
-SCHEMA = Path(__file__).resolve().parents[3] / "docs" / "interfaces" / "db.sql"
+from copytrade_worker import db as worker_db
 
 
 @pytest.fixture
 def db():
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA.read_text())
+    conn = worker_db.connect(":memory:")
     yield conn
     conn.close()
 

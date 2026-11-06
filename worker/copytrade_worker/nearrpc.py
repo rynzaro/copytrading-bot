@@ -27,7 +27,8 @@ class Rpc:
 
     def call(self, method: str, params: Any) -> Any:
         body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
-        req = urllib.request.Request(self.url, body, {"content-type": "application/json", "user-agent": "copytrade-worker"})
+        headers = {"content-type": "application/json", "user-agent": "copytrade-worker"}
+        req = urllib.request.Request(self.url, body, headers)
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
             d = json.load(r)
         if "error" in d:
@@ -38,8 +39,9 @@ class Rpc:
         return res
 
     def view(self, account: str, method: str, args: dict) -> Any:
+        b64 = base64.b64encode(json.dumps(args).encode()).decode()
         r = self.call("query", {"request_type": "call_function", "finality": "final", "account_id": account,
-                                "method_name": method, "args_base64": base64.b64encode(json.dumps(args).encode()).decode()})
+                                "method_name": method, "args_base64": b64})
         return json.loads(bytes(r["result"]).decode())
 
     def view_access_key(self, account: str, public_key: str) -> dict:
@@ -55,7 +57,8 @@ class Rpc:
 
     def tx_status(self, tx_hash: str, sender: str) -> dict | None:
         try:
-            return self.call("tx", {"tx_hash": tx_hash, "sender_account_id": sender, "wait_until": "EXECUTED_OPTIMISTIC"})
+            params = {"tx_hash": tx_hash, "sender_account_id": sender, "wait_until": "EXECUTED_OPTIMISTIC"}
+            return self.call("tx", params)
         except RpcError as e:
             if "UNKNOWN_TRANSACTION" in e.text or "TIMEOUT" in e.text.upper():
                 return None

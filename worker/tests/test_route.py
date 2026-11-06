@@ -3,7 +3,7 @@ from fractions import Fraction
 import pytest
 
 from copytrade_worker import route as R
-from copytrade_worker.types import MinOutInputs
+from copytrade_worker.types import Hop, MinOutInputs
 
 from .fakes import FakeRpc, dcl_pool, ref_pool
 
@@ -23,7 +23,7 @@ def rpc_with_pools():
 def test_ref_v1_direct_rate_and_price():
     f = rpc_with_pools()
     r = R.pick_route(f, MEME, [("ref_v1", "7")])
-    assert r.venue == "ref_v1" and r.hops == [{"pool_id": "7", "token_in": R.WNEAR, "token_out": MEME}]
+    assert r.venue == "ref_v1" and r.hops == (Hop("7", R.WNEAR, MEME),)
     assert r.rate == Fraction(10 ** 6 * E18, 1000 * E24) * Fraction(9970, 10000)
     assert float(r.price_near) == pytest.approx(0.001 / 0.997)
 
@@ -64,8 +64,8 @@ def test_via_rhea_dcl_uses_deepest_bridge():
     f.dcl[R.dcl_pool_id(R.RHEA, R.WNEAR, 2000)] = dcl_pool(R.RHEA, R.WNEAR, 2000, 0, tx=E18, ty=E24)
     f.dcl[R.dcl_pool_id(R.RHEA, R.WNEAR, 400)] = dcl_pool(R.RHEA, R.WNEAR, 400, 0, tx=E18, ty=50 * E24)
     r = R.pick_route(f, MEME, [("dcl", R.dcl_pool_id(MEME, R.RHEA, 2000))])
-    assert r.hops == [{"pool_id": "token.rhealab.near|wrap.near|400", "token_in": R.WNEAR, "token_out": R.RHEA},
-                      {"pool_id": "meme.near|token.rhealab.near|2000", "token_in": R.RHEA, "token_out": MEME}]
+    assert r.hops == (Hop("token.rhealab.near|wrap.near|400", R.WNEAR, R.RHEA),
+                      Hop("meme.near|token.rhealab.near|2000", R.RHEA, MEME))
     assert r.rate == Fraction(9996, 10000) * Fraction(998, 1000)
 
 
@@ -78,7 +78,7 @@ def test_via_rhea_ref_needs_configured_bridge(monkeypatch):
     f.ref[9] = ref_pool(R.WNEAR, R.RHEA, 10 * E24, 20 * E18, fee=20)
     monkeypatch.setenv("REF_V1_RHEA_POOLS", "9")
     r = R.pick_route(f, MEME, [("ref_v1", "3")])
-    assert [h["pool_id"] for h in r.hops] == ["9", "3"]
+    assert [h.pool_id for h in r.hops] == ["9", "3"]
 
 
 def test_rejects_non_quote_pair_and_unknown_venue_and_stable_pool():
@@ -99,7 +99,8 @@ def test_min_out_unlimited_no_guard_is_one():
 
 def test_min_out_slippage_only():
     # 10 NEAR, rate 1000 raw/yocto, 1% slippage -> 10e27 / 1.01
-    assert R.min_out(10 * E24, route(), MinOutInputs(None, 100, None, None)) == int(Fraction(10 * E24 * 1000) / Fraction(101, 100))
+    want = int(Fraction(10 * E24 * 1000) / Fraction(101, 100))
+    assert R.min_out(10 * E24, route(), MinOutInputs(None, 100, None, None)) == want
 
 
 def test_min_out_guard_only_and_tightest_wins():
@@ -124,3 +125,14 @@ def test_min_out_errors():
         R.min_out(E24, r, MinOutInputs(2.0, "unlimited", None, None))
     with pytest.raises(R.LimitError, match="bad_amount"):
         R.min_out(0, r, MinOutInputs(None, "unlimited", None, None))
+
+
+def test_hints_from_plan_hops_touching_token():
+    hops = (Hop("1", R.WNEAR, R.RHEA), Hop("2", R.RHEA, MEME))
+    assert R.hints_for(MEME, "ref_v1", hops) == [("ref_v1", "2")]
+
+
+def test_hints_without_target_route_are_dcl_quote_pools():
+    h = R.hints_for(MEME, None, ())
+    assert ("dcl", "meme.near|wrap.near|2000") in h and ("dcl", "meme.near|token.rhealab.near|100") in h
+    assert len(h) == 2 * len(R.DCL_FEES) and all(v == "dcl" for v, _ in h)

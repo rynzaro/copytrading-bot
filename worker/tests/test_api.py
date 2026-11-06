@@ -20,7 +20,11 @@ def srv(tmp_path):
     rpc = FakeRpc()
     rpc.url = "http://rpc.test"
     ks = K.KeyStore(tmp_path)
-    app = A.App(db, rpc, ks, feeds=lambda: {"teardata": "ok"})
+    def parts():
+        r = db.execute("SELECT MAX(seen_at) FROM signals").fetchone()
+        return {"feeds": {"teardata": "ok"}, "last_signal_at": r[0]}
+
+    app = A.App(db, rpc, ks, health_parts=parts)
     s = A.serve(app, port=0)
     yield f"http://127.0.0.1:{s.server_address[1]}", db, rpc, ks, tmp_path
     s.shutdown()
@@ -95,5 +99,21 @@ def test_vault_confirmed_rejects(srv):
 
 def test_health(srv):
     base, db = srv[0], srv[1]
-    db.execute("INSERT INTO signals (target_id, token_id, kind, tx_hash, seen_at, source) VALUES ('a','b','swap','t',42,'teardata')")
+    db.execute("INSERT INTO signals (target_id, token_id, kind, tx_hash, seen_at, source)"
+               " VALUES ('a','b','swap','t',42,'teardata')")
     assert call(base, "/health") == (200, {"feeds": {"teardata": "ok"}, "rpc": "http://rpc.test", "last_signal_at": 42})
+
+
+def test_health_without_signal_side(tmp_path):
+    db = connect(tmp_path / "t.db")
+    rpc = FakeRpc()
+    rpc.url = "http://rpc.test"
+    app = A.App(db, rpc, K.KeyStore(tmp_path))
+    assert app.health() == (200, {"feeds": {}, "rpc": "http://rpc.test", "last_signal_at": None})
+
+
+def test_port_from_worker_port_env(monkeypatch):
+    monkeypatch.delenv("WORKER_PORT", raising=False)
+    assert A.api_port() == 8700
+    monkeypatch.setenv("WORKER_PORT", "9123")
+    assert A.api_port() == 9123

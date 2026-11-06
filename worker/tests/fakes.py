@@ -9,7 +9,8 @@ from copytrade_worker.route import DCL, REF_V1
 
 
 def event(name, data):
-    return "EVENT_JSON:" + json.dumps({"standard": "copytrade_vault", "version": "1.0.0", "event": name, "data": [data]})
+    e = {"standard": "copytrade_vault", "version": "1.0.0", "event": name, "data": [data]}
+    return "EVENT_JSON:" + json.dumps(e)
 
 
 def outcome(logs=(), failure=None):

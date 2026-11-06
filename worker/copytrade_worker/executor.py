@@ -1,5 +1,9 @@
 """Executor: Plan -> register_token (if needed) -> vault.swap -> outcome -> copy_buys + activity.
 
+Row owner: the signals side (`signals.Pipeline.decide` via `db.claim_copy_buy`) inserts the 'planned'
+copy_buys row before it queues the Plan. The executor never inserts; it only acts on a row that is
+'planned' for the plan's signal_id, and moves it to 'sent' / 'filled' / 'failed'.
+
 DRY_RUN=1 (default): build and sign, don't send; log the would-be tx (no key material).
 Retry: resend while the price is within limits and the failure is a clear swap failure; then mark failed.
 An unknown outcome (timeout) is never resent: the row stays 'sent' so the token stays blocked.
@@ -15,6 +19,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from . import db as D
 from . import keys as K
 from . import route as R
 from .db import now_ms
@@ -84,8 +89,7 @@ class Executor:
 
     # ---- db ----
     def _activity(self, owner_id: str | None, kind: str, payload: dict) -> None:
-        self.db.execute("INSERT INTO activity (owner_id, kind, payload, created_at) VALUES (?,?,?,?)",
-                        (owner_id, kind, json.dumps(payload), now_ms()))
+        D.add_activity(self.db, owner_id, kind, payload)
 
     def _update(self, plan: Plan, **cols: Any) -> None:
         cols["updated_at"] = now_ms()
@@ -93,16 +97,8 @@ class Executor:
         self.db.execute(f"UPDATE copy_buys SET {sets} WHERE owner_id = ? AND token_id = ?",
                         (*cols.values(), plan.owner_id, plan.token_id))
 
-    def claim(self, plan: Plan) -> bool:
-        """Own the (owner, token) row: new row, a 'failed' row reused, or a 'planned' row for this signal."""
-        t = now_ms()
-        self.db.execute(
-            "INSERT INTO copy_buys (owner_id, token_id, signal_id, status, amount_in, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?) ON CONFLICT(owner_id, token_id) DO UPDATE SET status = 'planned', "
-            "signal_id = excluded.signal_id, reason = NULL, amount_in = excluded.amount_in, min_out = NULL, "
-            "amount_out = NULL, tx_hash = NULL, updated_at = excluded.updated_at "
-            "WHERE copy_buys.status = 'failed' OR (copy_buys.status = 'planned' AND copy_buys.signal_id = excluded.signal_id)",
-            (plan.owner_id, plan.token_id, plan.signal_id, "planned", plan.amount_in, t, t))
+    def claimed(self, plan: Plan) -> bool:
+        """True when the (owner, token) row is 'planned' for this plan's signal (written by db.claim_copy_buy)."""
         row = self.db.execute("SELECT status, signal_id FROM copy_buys WHERE owner_id = ? AND token_id = ?",
                               (plan.owner_id, plan.token_id)).fetchone()
         return row is not None and row["status"] == "planned" and row["signal_id"] == plan.signal_id
@@ -135,10 +131,10 @@ class Executor:
         except RpcError as e:
             t = e.text
             if "NotEnoughAllowance" in t:
-                raise Fail("gas_allowance")
+                raise Fail("gas_allowance") from None
             if "InvalidNonce" in t:
-                raise Fail("invalid_nonce", retry=True)
-            raise Fail("send_error", retry=True)
+                raise Fail("invalid_nonce", retry=True) from None
+            raise Fail("send_error", retry=True) from None
         return tx, self._wait(tx, plan.vault_id)
 
     def _would_send(self, plan: Plan, tx: K.SignedTx, method: str, args: dict) -> None:
@@ -170,7 +166,7 @@ class Executor:
         try:
             bal = self.rpc.view(plan.token_id, "storage_balance_of", {"account_id": plan.vault_id})
         except RpcError:
-            raise Fail("storage_check_failed")
+            raise Fail("storage_check_failed") from None
         if bal is not None:
             return
         args = {"token_id": plan.token_id}
@@ -190,17 +186,18 @@ class Executor:
 
     def _swap_once(self, key: K.BotKey, plan: Plan) -> str:
         """One attempt. Returns final status 'filled' | 'sent' (unknown) | 'dry_run'. Raises Fail."""
-        hints = [(plan.venue, h["pool_id"]) for h in plan.hops if plan.token_id in (h.get("token_in"), h.get("token_out"))]
+        hints = R.hints_for(plan.token_id, plan.venue, plan.hops)
         try:
             rt = R.pick_route(self.rpc, plan.token_id, hints)
         except (R.NoRoute, RpcError):
-            raise Fail("no_route")
+            raise Fail("no_route") from None
         amount_in = int(plan.amount_in)
         try:
             mo = R.min_out(amount_in, rt, plan.min_out_inputs)
         except R.LimitError as e:
-            raise Fail(e.reason)
-        args = {"args": {"venue": rt.venue, "hops": rt.hops, "amount_in": str(amount_in), "min_out": str(mo)}}
+            raise Fail(e.reason) from None
+        hops = [h.to_json() for h in rt.hops]
+        args = {"args": {"venue": rt.venue, "hops": hops, "amount_in": str(amount_in), "min_out": str(mo)}}
         if self.dry_run:
             tx = self._sign(key, plan, "swap", args, SWAP_GAS)
             self._would_send(plan, tx, "swap", args)
@@ -215,7 +212,7 @@ class Executor:
             t = e.text
             # Rejected by RPC: never on chain, safe to resend.
             raise Fail("gas_allowance" if "NotEnoughAllowance" in t else "send_error",
-                       retry="NotEnoughAllowance" not in t)
+                       retry="NotEnoughAllowance" not in t) from None
         res = self._wait(tx, plan.vault_id)
         self.check_gas(plan.owner_id, plan.vault_id, key.public_key)
         if res is None:
@@ -240,7 +237,7 @@ class Executor:
 
     def run(self, plan: Plan) -> str:
         """Execute one plan. Returns final copy_buys status (or 'duplicate' if not claimed)."""
-        if not self.claim(plan):
+        if not self.claimed(plan):
             log.info("skip duplicate owner=%s token=%s", plan.owner_id, plan.token_id)
             return "duplicate"
         last_tx = None
@@ -280,7 +277,7 @@ class Executor:
         self._activity(plan.owner_id, "buy_failed", p)
         return "failed"
 
-    def loop(self, q: queue.Queue[Plan | None]) -> None:
+    def loop(self, q: queue.Queue[Any]) -> None:
         """Consume plans one at a time (nonce safety). None stops the loop."""
         while True:
             plan = q.get()

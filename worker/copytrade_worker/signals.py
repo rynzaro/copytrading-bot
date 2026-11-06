@@ -167,7 +167,7 @@ class Pipeline:
                 return None
             s.id = sid
             users = db.users_for_target(self.conn, s.target_id, s.token_id)
-        self.log("signal", id=sid, target=s.target_id, token=s.token_id, kind=s.kind, source=s.source)
+        self.log("signal", id=sid, target=s.target_id, token=s.token_id, signal_kind=s.kind, source=s.source)
         for u in users:
             self.decide(s, u)
         return sid

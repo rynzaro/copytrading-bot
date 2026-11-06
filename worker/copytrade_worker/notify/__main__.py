@@ -1,9 +1,10 @@
-"""Run: python -m copytrade_worker.notify <sqlite path>. Schema is applied by copytrade_worker.db (0005)."""
+"""Run the notifier alone: python -m copytrade_worker.notify <sqlite path>.
+The full worker (`python -m copytrade_worker`) runs it as a thread."""
 
 import logging
-import sqlite3
 import sys
 
+from .. import db
 from .config import Config
 from .loop import Notifier
 
@@ -13,8 +14,7 @@ def main(argv=None) -> None:
     if len(argv) != 1:
         sys.exit("usage: python -m copytrade_worker.notify <db path>")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    conn = sqlite3.connect(argv[0], timeout=30)
-    conn.execute("PRAGMA busy_timeout = 30000")
+    conn = db.connect(argv[0])
     Notifier(conn, Config.from_env()).run_forever()
 
 

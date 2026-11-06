@@ -14,7 +14,7 @@ from fractions import Fraction
 from typing import Any
 
 from .nearrpc import RpcError
-from .types import MinOutInputs
+from .types import Hop, MinOutInputs
 
 getcontext().prec = 60
 
@@ -68,7 +68,7 @@ class Pool:
 @dataclass(frozen=True)
 class Route:
     venue: str
-    hops: list[dict]
+    hops: tuple[Hop, ...]
     rate: Fraction                # raw token out per yocto wNEAR in, after fees
     decimals: int
     depth_near: Fraction          # quote-side reserve of the main pool, in NEAR
@@ -86,7 +86,8 @@ def _dcl_pool(d: dict, pool_id: str) -> Pool | None:
     if f"{x}|{y}|{fee}" != pool_id:
         return None
     spot = Fraction(Decimal("1.0001") ** int(d["current_point"]))
-    return Pool("dcl", pool_id, x, y, (int(d.get("total_x", 0)), int(d.get("total_y", 0))), spot, Fraction(fee, 10 ** 6))
+    reserves = (int(d.get("total_x", 0)), int(d.get("total_y", 0)))
+    return Pool("dcl", pool_id, x, y, reserves, spot, Fraction(fee, 10 ** 6))
 
 
 def _ref_pool(d: dict, pool_id: str) -> Pool | None:
@@ -142,6 +143,16 @@ def token_decimals(rpc: Any, token_id: str) -> int:
     return dec
 
 
+def hints_for(token_id: str, venue: str | None, hops: tuple[Hop, ...]) -> list[tuple[str, str]]:
+    """Candidate main pools [(venue, pool_id)]: the plan's hops that touch the token, else (no target route)
+    the token's DCL pools against wNEAR and RHEA at every fee tier. Ref v1 pools have no derivable id."""
+    if venue is not None:
+        got = [(venue, h.pool_id) for h in hops if token_id in (h.token_in, h.token_out)]
+        if got:
+            return got
+    return [("dcl", dcl_pool_id(token_id, q, f)) for q in QUOTES for f in DCL_FEES]
+
+
 def pick_route(rpc: Any, token_id: str, hints: list[tuple[str, str]], decimals: int | None = None) -> Route:
     """Pick the deepest valid main pool among hints [(venue, pool_id)], quote wNEAR or RHEA (then via RHEA/wNEAR)."""
     if token_id in QUOTES:
@@ -158,16 +169,17 @@ def pick_route(rpc: Any, token_id: str, hints: list[tuple[str, str]], decimals: 
         q = p.other(token_id)
         if p.reserve(q) <= 0:
             continue
-        main_hop = {"pool_id": p.pool_id, "token_in": q, "token_out": token_id}
+        main_hop = Hop(p.pool_id, q, token_id)
+        hops: tuple[Hop, ...]
         if q == WNEAR:
-            hops, rate, depth = [main_hop], p.rate(WNEAR, token_id), Fraction(p.reserve(WNEAR), 10 ** NEAR_DEC)
+            hops, rate, depth = (main_hop,), p.rate(WNEAR, token_id), Fraction(p.reserve(WNEAR), 10 ** NEAR_DEC)
         else:
             if venue not in bridges:
                 bridges[venue] = bridge_pool(rpc, venue)
             b = bridges[venue]
             if b is None:
                 continue
-            hops = [{"pool_id": b.pool_id, "token_in": WNEAR, "token_out": RHEA}, main_hop]
+            hops = (Hop(b.pool_id, WNEAR, RHEA), main_hop)
             rate = b.rate(WNEAR, RHEA) * p.rate(RHEA, token_id)
             depth = Fraction(p.reserve(RHEA)) / b.rate(WNEAR, RHEA) / 10 ** NEAR_DEC
         if rate <= 0:

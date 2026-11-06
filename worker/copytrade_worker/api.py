@@ -19,8 +19,10 @@ MAX_BODY = 4096
 
 class App:
     def __init__(self, db: sqlite3.Connection, rpc: Any, keystore: K.KeyStore,
-                 feeds: Callable[[], dict] = dict):
-        self.db, self.rpc, self.ks, self.feeds = db, rpc, keystore, feeds
+                 health_parts: Callable[[], dict] | None = None):
+        """health_parts: the signal side's part of /health, {"feeds", "last_signal_at"} (service.Signals.health_json).
+        None: no feeds, last_signal_at read from the DB."""
+        self.db, self.rpc, self.ks, self.health_parts = db, rpc, keystore, health_parts
         self.lock = threading.Lock()
 
     def bot_key(self, body: dict) -> tuple[int, dict]:
@@ -66,12 +68,16 @@ class App:
         return 200, {"ok": True}
 
     def health(self) -> tuple[int, dict]:
+        rpc = getattr(self.rpc, "url", "")
+        if self.health_parts is not None:
+            try:
+                parts = self.health_parts()
+                return 200, {"feeds": parts.get("feeds", {}), "rpc": rpc, "last_signal_at": parts.get("last_signal_at")}
+            except Exception:  # noqa: BLE001 - health must answer
+                log.exception("health parts")
         r = self.db.execute("SELECT MAX(seen_at) AS m FROM signals").fetchone()
-        try:
-            feeds = self.feeds()
-        except Exception:  # noqa: BLE001 - health must answer
-            feeds = {"error": "feeds"}
-        return 200, {"feeds": feeds, "rpc": getattr(self.rpc, "url", ""), "last_signal_at": r["m"]}
+        feeds: dict = {} if self.health_parts is None else {"error": "feeds"}
+        return 200, {"feeds": feeds, "rpc": rpc, "last_signal_at": r["m"]}
 
 
 def handler(app: App) -> type[BaseHTTPRequestHandler]:
@@ -116,9 +122,16 @@ def handler(app: App) -> type[BaseHTTPRequestHandler]:
     return H
 
 
+DEFAULT_PORT = 8700  # worker-api.md: env WORKER_PORT, default 8700; web calls WORKER_URL
+
+
+def api_port() -> int:
+    return int(os.environ.get("WORKER_PORT") or DEFAULT_PORT)
+
+
 def serve(app: App, port: int | None = None, host: str = "127.0.0.1") -> ThreadingHTTPServer:
     """Start in a daemon thread, bound to 127.0.0.1."""
-    port = int(os.environ.get("WORKER_API_PORT", "8787")) if port is None else port
+    port = api_port() if port is None else port
     srv = ThreadingHTTPServer((host, port), handler(app))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv

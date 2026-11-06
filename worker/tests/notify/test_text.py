@@ -22,7 +22,11 @@ def test_clean_strips_controls_and_truncates():
 @pytest.mark.parametrize(
     "kind,payload,expect",
     [
-        ("buy_filled", {"token_id": "wth.near", "amount_in": str(10 * YOCTO), "tx_hash": "H1"}, ["Bought", "wth.near", "10 NEAR", "H1"]),
+        (
+            "buy_filled",
+            {"token_id": "wth.near", "amount_in": str(10 * YOCTO), "tx_hash": "H1"},
+            ["Bought", "wth.near", "10 NEAR", "H1"],
+        ),
         ("buy_failed", {"token_id": "t.near", "reason": "price_guard"}, ["failed", "t.near", "price_guard"]),
         ("buy_skipped", {"token_id": "t.near", "reason": "mcap_high"}, ["Skipped", "t.near", "mcap_high"]),
         ("storage_paid", {"token_id": "t.near", "amount": str(YOCTO // 500)}, ["Storage", "t.near", "0.002 NEAR"]),
