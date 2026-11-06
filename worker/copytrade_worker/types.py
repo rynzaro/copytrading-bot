@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 Venue = Literal["dcl", "ref_v1"]
-SignalKind = Literal["swap", "limit_fill"]
+SignalKind = Literal["swap"]  # only executed swaps become signals
 
 
 @dataclass(frozen=True)
@@ -65,7 +65,7 @@ class Signal:
     token_id: str
     kind: SignalKind
     tx_hash: str
-    source: str  # 'teardata' | 'intear_ws' | 'order_watch'
+    source: str  # 'teardata' | 'intear_ws'
     seen_at: int  # unix ms
     venue: str | None = None  # 'dcl' | 'ref_v1' | other
     pool_id: str | None = None

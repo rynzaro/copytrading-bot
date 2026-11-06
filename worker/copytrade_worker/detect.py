@@ -2,8 +2,10 @@
 
 Ported from the Illia sniper (Beak tp/illia/detect.py). Two stages per buy:
   tx    the target's transaction in a chunk (block N): token, amount in, pools, or the order point.
-  fill  receipt logs of the executed swap (N+2) or the placed order: exact amounts. Only successful receipts count.
-Only fills become signals (`to_signal`); a placed limit order is watched (orders.py) and copied when it fills.
+  fill  receipt logs of the executed swap (N+2) or the placed order (`order_added`): exact amounts.
+        Only successful receipts count.
+Only swap fills become signals (`to_signal`). Limit buy orders become alerts, never buys: placed (`limit_order`)
+and filled (`order_fill`, from claim/cancel events or list_active_orders records).
 Token and account names here are untrusted text: compared, never executed.
 """
 
@@ -158,9 +160,7 @@ def receipt_signals(ro: dict[str, Any], whales: Collection[str], tx_hash: str | 
                         )
                     )
                 if e.get("event") in ("order_completed", "order_cancelled") and d.get("owner_id") == signer:
-                    f = order_fill(
-                        d, str(signer)
-                    )  # emitted when the owner claims or cancels: fills that happened earlier
+                    f = order_fill(d, str(signer))  # emitted on claim or cancel: fills that happened earlier
                     if f:
                         out.append(dict(f, tx=txh, event=e.get("event")))
         if swaps:  # a multi-hop swap logs one event per pool: first in, last out
@@ -298,12 +298,31 @@ def _amount(x: Any) -> str | None:
     return s if s.isdigit() and int(s) > 0 else None
 
 
-def to_signal(raw: Raw, source: str, seen_at: int, tx_hash: str | None = None) -> Signal | None:
-    """A fill (swap or filled limit order) -> Signal, or None. Placed orders and tx-stage rows are not signals.
-    `tx_hash` overrides the raw tx (order watch fills carry the placing tx)."""
-    if raw.get("stage") != "fill" or raw.get("kind") not in ("swap", "order_fill"):
+def limit_order(raw: Raw) -> Raw | None:
+    """A placed DCL limit buy order paid in wNEAR (`order_added`) -> alert fields, or None.
+    Keys: target_id, token_id, pool_id, amount_near (yocto), point (int or None), tx_hash, order_id. No meme check."""
+    if raw.get("stage") != "fill" or raw.get("kind") != "order" or raw.get("token_in") != WNEAR:
         return None
-    target, token, txh = _str(raw.get("whale")), _str(raw.get("token")), _str(tx_hash or raw.get("tx"))
+    target, token, txh = _str(raw.get("whale")), _str(raw.get("token")), _str(raw.get("tx"))
+    pools = raw.get("pools") or []
+    pool = _str(pools[0]) if len(pools) == 1 else None
+    amount, oid = _amount(raw.get("amount_in")), _str(raw.get("order_id"))
+    if not (target and token and txh and pool and amount and oid) or token == WNEAR:
+        return None
+    if set(pool.split("|")[:2]) != {token, WNEAR}:
+        return None
+    pt = raw.get("point")
+    point = pt if isinstance(pt, int) and not isinstance(pt, bool) else None
+    return dict(
+        target_id=target, token_id=token, pool_id=pool, amount_near=amount, point=point, tx_hash=txh, order_id=oid
+    )
+
+
+def to_signal(raw: Raw, source: str, seen_at: int) -> Signal | None:
+    """A swap fill -> Signal, or None. Placed orders and tx-stage rows are not signals."""
+    if raw.get("stage") != "fill" or raw.get("kind") != "swap":
+        return None
+    target, token, txh = _str(raw.get("whale")), _str(raw.get("token")), _str(raw.get("tx"))
     if not (target and token and txh):
         return None
     pools = [p for p in raw.get("pools") or [] if isinstance(p, str) and p]
@@ -317,7 +336,7 @@ def to_signal(raw: Raw, source: str, seen_at: int, tx_hash: str | None = None) -
     return Signal(
         target_id=target,
         token_id=token,
-        kind="swap" if raw["kind"] == "swap" else "limit_fill",
+        kind="swap",
         tx_hash=txh,
         source=source,
         seen_at=seen_at,
@@ -328,7 +347,7 @@ def to_signal(raw: Raw, source: str, seen_at: int, tx_hash: str | None = None) -
         token_in=token_in,
         amount_in=amount_in,
         amount_out=_amount(raw.get("amount_out")),
-        extra={k: raw[k] for k in ("order_id", "point", "height") if raw.get(k) is not None},
+        extra={k: raw[k] for k in ("height",) if raw.get(k) is not None},
     )
 
 

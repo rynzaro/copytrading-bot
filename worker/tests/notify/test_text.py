@@ -35,6 +35,30 @@ def test_clean_strips_controls_and_truncates():
         ("sell", {"token_id": "t.near"}, ["Sold", "t.near"]),
         ("withdraw", {"token_id": "t.near"}, ["Withdraw", "t.near"]),
         ("system", {"text": "feed down"}, ["feed down"]),
+        (
+            "limit_order",
+            {
+                "stage": "placed",
+                "target_id": "simsey.near",
+                "token_id": "b.near",
+                "pool_id": "b.near|wrap.near|10000",
+                "amount_near": str(14 * YOCTO),
+                "price": 0.000249567,
+                "tx_hash": "H2",
+            },
+            ["simsey.near", "placed a limit buy", "b.near", "14 NEAR", "0.000249567 NEAR", "No copy buy", "H2"],
+        ),
+        (
+            "limit_order",
+            {
+                "stage": "filled",
+                "target_id": "w.near",
+                "token_id": "b.near",
+                "amount_near": str(YOCTO),
+                "tx_hash": "H3",
+            },
+            ["w.near", "limit buy filled", "b.near", "1 NEAR", "No copy buy", "H3"],
+        ),
         ("weird_kind", {}, ["weird_kind"]),
     ],
 )
@@ -53,3 +77,11 @@ def test_format_untrusted_token_name():
 
 def test_format_bad_payload_types():
     assert "Bought" in format_activity("buy_filled", {"token_id": 5, "amount_in": {"a": 1}})
+
+
+def test_limit_order_text_bad_payload():
+    text = format_activity("limit_order", {"target_id": "w\nx", "price": "1e9", "amount_near": "NaN"})
+    assert "limit buy" in text and "w x" in text and "1e9" not in text and "NaN" not in text
+    assert "@" not in format_activity("limit_order", {"price": float("inf")})
+    assert format_activity("limit_order", {"price": True}).count("NEAR") == 0
+    assert "placed" in format_activity("limit_order", {"stage": "evil"})

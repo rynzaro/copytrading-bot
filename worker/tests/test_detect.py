@@ -105,6 +105,74 @@ def test_v1_multi_hop_token_is_last_token_out():
     assert s and s.venue == "ref_v1" and s.near_in == "10" and s.hops == ()
 
 
+def test_limit_order_placed_to_alert():
+    (placed,) = [x for x in raws("simsey_order", {"simsey.near"}) if x["stage"] == "fill"]
+    a = detect.limit_order(placed)
+    assert a == dict(
+        target_id="simsey.near",
+        token_id=BATMAN,
+        pool_id=BATMAN + "|wrap.near|10000",
+        amount_near=str(14 * 10**24),
+        point=55200,
+        tx_hash="7PZZMDLCwjXyPRTBpQ1ui85ko43tPbGeLUrMJcaUGqsx",
+        order_id=BATMAN + "|wrap.near|10000#12480",
+    )
+    px = detect.point_price(55200, BATMAN + "|wrap.near|10000", BATMAN, 18, 24)
+    assert abs(px - 7 / 28048.675444921538699338) / px < 1e-6
+
+
+def test_limit_order_rejects_non_buys_and_bad_data():
+    (placed,) = [x for x in raws("simsey_order", {"simsey.near"}) if x["stage"] == "fill"]
+    assert detect.limit_order(dict(placed, token_in=BATMAN, token="wrap.near")) is None  # limit sell
+    assert detect.limit_order(dict(placed, token_in="token.rhealab.near")) is None  # not paid in wNEAR
+    assert detect.limit_order(dict(placed, amount_in="0")) is None
+    assert detect.limit_order(dict(placed, amount_in="1e24")) is None
+    assert detect.limit_order(dict(placed, tx=None)) is None
+    assert detect.limit_order(dict(placed, order_id=None)) is None
+    assert detect.limit_order(dict(placed, pools=[None])) is None
+    assert detect.limit_order(dict(placed, pools=["a.near|b.near|100"])) is None  # pool lacks the token
+    assert detect.limit_order(dict(placed, stage="tx")) is None
+    assert detect.limit_order(dict(placed, kind="swap")) is None
+    assert detect.limit_order(dict(placed, point="55200")) == dict(detect.limit_order(placed), point=None)
+
+
+def test_order_completed_event_is_a_fill_not_a_signal():
+    ro = {
+        "tx_hash": "TC",
+        "receipt": {"receiver_id": detect.DCL, "receipt": {"Action": {"signer_id": ROOT}}},
+        "execution_outcome": {
+            "outcome": {
+                "status": {"SuccessValue": ""},
+                "executor_id": detect.DCL,
+                "logs": [
+                    "EVENT_JSON:"
+                    + json.dumps(
+                        {
+                            "standard": "dcl.ref",
+                            "event": "order_completed",
+                            "data": [
+                                {
+                                    "owner_id": ROOT,
+                                    "buy_token": BATMAN,
+                                    "sell_token": "wrap.near",
+                                    "original_amount": "10",
+                                    "remain_amount": "0",
+                                    "bought_amount": "99",
+                                    "pool_id": BATMAN + "|wrap.near|10000",
+                                    "order_id": "o",
+                                }
+                            ],
+                        }
+                    )
+                ],
+            }
+        },
+    }
+    (f,) = detect.receipt_signals(ro, WHALES)
+    assert (f["kind"], f["order_id"], f["amount_in"], f["amount_out"], f["tx"]) == ("order_fill", "o", "10", "99", "TC")
+    assert detect.to_signal(f, "teardata", 1) is None
+
+
 def test_order_fill_from_record():
     row = dict(
         order_id=BATMAN + "|wrap.near|10000#12480",
@@ -124,10 +192,6 @@ def test_order_fill_from_record():
         str(14 * 10**24),
         "56097350889843077398677",
     )
-    s = detect.to_signal(f, "order_watch", 1, tx_hash="PLACE")
-    assert s and (s.kind, s.tx_hash, s.near_in, s.venue) == ("limit_fill", "PLACE", str(14 * 10**24), "dcl")
-    px = detect.point_price(55200, BATMAN + "|wrap.near|10000", BATMAN, 18, 24)
-    assert abs(detect.fill_price(s, 18) - px) / px < 1e-6
 
 
 def test_ws_row():

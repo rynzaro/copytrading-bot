@@ -159,47 +159,127 @@ def test_sniping_tax_cache(conn, age_min, cached, skipped):
         assert activity(conn)[-1][2] == {"token_id": IMEME, "reason": "sniping_tax"}
 
 
-def order_row(bought=0, remain=14 * 10**24):
+ORDER_TX = "7PZZMDLCwjXyPRTBpQ1ui85ko43tPbGeLUrMJcaUGqsx"
+OID = BATMAN + "|wrap.near|10000#12480"
+POOL = BATMAN + "|wrap.near|10000"
+KEYS = {"stage", "target_id", "token_id", "pool_id", "amount_near", "price", "tx_hash"}
+
+
+def order_row(bought=0, remain=14 * 10**24, **kw):
     return dict(
-        order_id=BATMAN + "|wrap.near|10000#12480",
-        owner_id="simsey.near",
-        sell_token="wrap.near",
-        buy_token=BATMAN,
-        point=55200,
-        pool_id=BATMAN + "|wrap.near|10000",
-        original_amount=str(14 * 10**24),
-        remain_amount=str(remain),
-        bought_amount=str(bought),
+        dict(
+            order_id=OID,
+            owner_id="simsey.near",
+            sell_token="wrap.near",
+            buy_token=BATMAN,
+            point=55200,
+            pool_id=POOL,
+            original_amount=str(14 * 10**24),
+            remain_amount=str(remain),
+            bought_amount=str(bought),
+        ),
+        **kw,
     )
 
 
-def test_limit_order_copied_only_when_filled(conn):
+def place(p):
+    return [i for b in blocks("simsey_order") for i in p.on_block(b, "teardata")]
+
+
+def test_limit_order_placed_alerts_users_never_buys(conn):
     add_user(conn, "a.near", target="simsey.near")
+    add_user(conn, "b.near", target="simsey.near", settings={})  # alert does not need buy settings
+    add_user(conn, "c.near", target="simsey.near", enabled=0)  # target off: no alert
+    add_user(conn, "d.near", target="simsey.near", bot_on=0)  # bot off: no alert
+    add_user(conn, "e.near", target=SF)  # other target
+    add_user(conn, "f.near", target="simsey.near", settings={"notify": {"limit_orders": False}})  # switched off
+    add_user(conn, "g.near", target="simsey.near", settings={"notify": {"limit_orders": True}})
     ch = FakeChain()
     p = pipe(conn, ch)
-    assert [i for b in blocks("simsey_order") for i in p.on_block(b, "teardata")] == []  # placed: watched only
-    assert list(p.orders) == [BATMAN + "|wrap.near|10000#12480"]
+    assert place(p) == []
+    assert drain(p) == []
+    assert conn.execute("select count(*) from signals").fetchone()[0] == 0
+    assert conn.execute("select count(*) from copy_buys").fetchone()[0] == 0
+    acts = activity(conn)
+    assert [(o, k) for o, k, _ in acts] == [
+        ("a.near", "limit_order"),
+        ("b.near", "limit_order"),
+        ("g.near", "limit_order"),
+    ]
+    pl = acts[0][2]
+    assert set(pl) == KEYS
+    assert (pl["stage"], pl["target_id"], pl["token_id"], pl["pool_id"], pl["amount_near"], pl["tx_hash"]) == (
+        "placed",
+        "simsey.near",
+        BATMAN,
+        POOL,
+        str(14 * 10**24),
+        ORDER_TX,
+    )
+    assert pl["price"] == pytest.approx(7 / 28048.675444921538699338, rel=1e-6)
+    assert conn.execute("select created_at from activity").fetchone()[0] == NOW
+    assert list(p.orders) == [OID]
+    # replay (both feeds, restarts): one alert per (order, stage, user)
+    assert place(p) == []
+    place(pipe(conn, ch))
+    assert len(activity(conn)) == 3
+
+
+def test_limit_order_filled_alerts_once_never_buys(conn):
+    add_user(conn, "a.near", target="simsey.near")
+    add_user(conn, "f.near", target="simsey.near", settings={"notify": {"limit_orders": False}})
+    ch = FakeChain()
+    p = pipe(conn, ch)
+    place(p)
     ch.orders = {"simsey.near": [order_row()]}
     assert p.poll_orders() == []
     ch.orders = {"simsey.near": [order_row(bought=28048675444921538699338, remain=7 * 10**24)]}
-    ids = p.poll_orders()
-    assert len(ids) == 1
-    (plan,) = drain(p)
-    assert plan.token_id == BATMAN
-    r = conn.execute("select kind, venue, near_in, source, tx_hash, fill_price from signals").fetchone()
-    assert tuple(r)[:5] == (
-        "limit_fill",
-        "dcl",
+    assert len(p.poll_orders()) == 1
+    assert drain(p) == []
+    assert conn.execute("select count(*) from signals").fetchone()[0] == 0
+    (_, (o, k, pl)) = activity(conn)
+    assert (o, k, set(pl)) == ("a.near", "limit_order", KEYS)
+    assert (pl["stage"], pl["amount_near"], pl["tx_hash"], pl["pool_id"]) == (
+        "filled",
         str(7 * 10**24),
-        "order_watch",
-        "7PZZMDLCwjXyPRTBpQ1ui85ko43tPbGeLUrMJcaUGqsx",
+        ORDER_TX,
+        POOL,
     )
-    assert r[5] == pytest.approx(7 / 28048.675444921538699338)
+    assert pl["price"] == pytest.approx(7 / 28048.675444921538699338)
     assert p.poll_orders() == []  # fires once
     assert p.orders == {}
 
 
-def test_unwatched_order_completed_event_ignored(conn):
+def test_filled_after_restart_uses_placed_tx_and_dedupes(conn):
+    add_user(conn, "a.near", target="simsey.near")
+    ch = FakeChain()
+    place(pipe(conn, ch))
+    ch.orders = {"simsey.near": [order_row(), dict(order_row(bought=5), order_id="filled#1")]}
+    p = pipe(conn, ch)  # restart: watch rebuilt from open orders
+    p.seed_orders()
+    assert list(p.orders) == [OID]
+    ch.orders = {"simsey.near": [order_row(bought=10**18, remain=10**24)]}
+    assert len(p.poll_orders()) == 1
+    assert [(x[2]["stage"], x[2]["tx_hash"]) for x in activity(conn)] == [("placed", ORDER_TX), ("filled", ORDER_TX)]
+    p2 = pipe(conn, ch)  # second restart before the order leaves the list: no second fill alert
+    ch.orders = {"simsey.near": [order_row()]}
+    p2.seed_orders()
+    ch.orders = {"simsey.near": [order_row(bought=10**18, remain=10**24)]}
+    assert p2.poll_orders() == []
+    assert len(activity(conn)) == 2
+
+
+def test_seeded_order_without_known_placing_tx_is_skipped(conn):
+    add_user(conn, "a.near", target="simsey.near")
+    ch = FakeChain(orders={"simsey.near": [order_row()]})
+    p = pipe(conn, ch)
+    p.seed_orders()
+    ch.orders = {"simsey.near": [order_row(bought=10, remain=10**24)]}
+    assert p.poll_orders() == []
+    assert activity(conn) == []
+
+
+def test_order_completed_event_fills_watched_order(conn):
     add_user(conn, "a.near", target="simsey.near")
     p = pipe(conn)
     f = dict(
@@ -208,22 +288,54 @@ def test_unwatched_order_completed_event_ignored(conn):
         whale="simsey.near",
         token=BATMAN,
         token_in="wrap.near",
-        amount_in="1",
-        amount_out="2",
-        pools=[],
+        amount_in=str(2 * 10**24),
+        amount_out=str(10**21),
+        pools=[POOL],
         venue="dclv2.ref-labs.near",
         order_id="nope",
-        tx="T",
+        tx="CLAIM",
     )
-    assert p.order_filled(f, "teardata") is None
+    assert p.order_filled(f) == []  # unwatched
+    place(p)
+    ids = p.order_filled(dict(f, order_id=OID))
+    assert len(ids) == 1
+    pl = activity(conn)[-1][2]
+    assert (pl["stage"], pl["tx_hash"], pl["amount_near"], pl["price"]) == (
+        "filled",
+        ORDER_TX,
+        str(2 * 10**24),
+        pytest.approx(0.002),
+    )
 
 
-def test_seed_orders_watches_open_unfilled(conn):
+def test_limit_order_price_unknown_without_decimals(conn):
     add_user(conn, "a.near", target="simsey.near")
-    ch = FakeChain(orders={"simsey.near": [order_row(), dict(order_row(bought=5), order_id="filled#1")]})
-    p = pipe(conn, ch)
-    p.seed_orders()
-    assert list(p.orders) == [BATMAN + "|wrap.near|10000#12480"]
-    ch.orders = {"simsey.near": [order_row(bought=10, remain=10**24)]}
-    p.poll_orders()
-    assert conn.execute("select tx_hash from signals").fetchone()[0] == "order:" + BATMAN + "|wrap.near|10000#12480"
+
+    class NoDec(FakeChain):
+        def tokens(self, ids):
+            raise OSError("down")
+
+    p = pipe(conn, NoDec())
+    place(p)
+    ((_, kind, pl),) = activity(conn)
+    assert kind == "limit_order" and "price" not in pl and pl["amount_near"] == str(14 * 10**24)
+
+
+def test_limit_order_non_meme_ignored(conn):
+    add_user(conn, "a.near", target="simsey.near")
+    p = pipe(conn)
+    raw = dict(
+        stage="fill",
+        kind="order",
+        whale="simsey.near",
+        token="usdt.tether-token.near",
+        token_in="wrap.near",
+        amount_in="5",
+        point=1,
+        pools=["usdt.tether-token.near|wrap.near|100"],
+        venue="dclv2.ref-labs.near",
+        tx="T",
+        order_id="o1",
+    )
+    assert p.on_order(raw) == []
+    assert activity(conn) == [] and p.orders == {}

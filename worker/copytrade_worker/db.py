@@ -123,6 +123,57 @@ def add_activity(
     return cur.lastrowid
 
 
+def limit_order_owners(conn: sqlite3.Connection, target_id: str) -> list[str]:
+    """Owners alerted on a target's limit orders: target enabled, bot on (the feed watches only those), and
+    settings.notify.limit_orders not false (default on)."""
+    rows = conn.execute(
+        "SELECT u.owner_id, u.settings FROM copy_targets t JOIN users u ON u.owner_id = t.owner_id"
+        " WHERE t.target_id = ? AND t.enabled = 1 AND u.bot_on = 1 ORDER BY u.owner_id",
+        (target_id,),
+    )
+    out = []
+    for owner, settings in rows:
+        n = _json(settings).get("notify")
+        if not (isinstance(n, dict) and n.get("limit_orders") is False):
+            out.append(owner)
+    return out
+
+
+def add_limit_order_alert(
+    conn: sqlite3.Connection, owner_id: str, payload: dict[str, Any], now: int | None = None
+) -> int | None:
+    """Insert a `limit_order` activity row unless one exists for (owner, stage, tx_hash, token_id): one order per
+    placing tx and token. Returns the new id, or None for a duplicate. Callers serialize writes (one lock)."""
+    cur = conn.execute(
+        "INSERT INTO activity(owner_id, kind, payload, created_at) SELECT ?, 'limit_order', ?, ?"
+        " WHERE NOT EXISTS (SELECT 1 FROM activity WHERE owner_id = ? AND kind = 'limit_order'"
+        " AND json_extract(payload, '$.stage') = ? AND json_extract(payload, '$.tx_hash') = ?"
+        " AND json_extract(payload, '$.token_id') = ?)",
+        (
+            owner_id,
+            json.dumps(payload, separators=(",", ":")),
+            now_ms() if now is None else now,
+            owner_id,
+            payload["stage"],
+            payload["tx_hash"],
+            payload["token_id"],
+        ),
+    )
+    return cur.lastrowid if cur.rowcount == 1 else None
+
+
+def placed_order_tx(conn: sqlite3.Connection, target_id: str, token_id: str, pool_id: str, since: int) -> str | None:
+    """Placing tx of the latest stored 'placed' alert for this target, token and pool since `since` (ms)."""
+    r = conn.execute(
+        "SELECT json_extract(payload, '$.tx_hash') FROM activity WHERE kind = 'limit_order'"
+        " AND json_extract(payload, '$.stage') = 'placed' AND json_extract(payload, '$.target_id') = ?"
+        " AND json_extract(payload, '$.token_id') = ? AND json_extract(payload, '$.pool_id') = ? AND created_at >= ?"
+        " ORDER BY created_at DESC, id DESC LIMIT 1",
+        (target_id, token_id, pool_id, since),
+    ).fetchone()
+    return r[0] if r and isinstance(r[0], str) else None
+
+
 def get_launch_tax(conn: sqlite3.Connection, token_id: str) -> dict[str, Any] | None:
     r = conn.execute(
         "SELECT token_id, code_hash, sniping_tax, checked_at FROM launch_tax WHERE token_id = ?", (token_id,)
