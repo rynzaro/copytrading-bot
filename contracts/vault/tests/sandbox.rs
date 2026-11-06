@@ -170,7 +170,12 @@ async fn setup_leaves_only_the_bot_key() -> anyhow::Result<()> {
     assert_eq!(st["owner_id"], e.owner.id().as_str());
     assert_eq!(st["paused"], false);
     assert_eq!(st["bot_key"], e.bot_sk.public_key().to_string());
-    assert_eq!(st["version"], "1.0.0");
+    assert_eq!(st["version"], "2.0.0");
+    assert_eq!(
+        st["storage_budget"],
+        json!({"per_day": (near(1) / 10).to_string(), "spent": "0", "window_start": "0"}),
+        "default 0.1 NEAR per 24 h"
+    );
     let keys = e.worker.view_access_keys(&e.vault).await?;
     assert_eq!(keys.len(), 1, "exactly one key on the vault");
     match &keys[0].access_key.permission {
@@ -328,7 +333,7 @@ async fn unregistered_output_or_slippage_moves_nothing() -> anyhow::Result<()> {
     // DEX gives 2x; asking 3x fails at the venue, input refunded to the vault as wNEAR
     let r = e.bot_call("swap", buy("ref_v1", MEME, near(1), near(3))).await?;
     let evs = events(&r.logs());
-    assert_eq!(event(&evs, "swap_result").unwrap()["data"]["error"], "swap failed, input refunded");
+    assert_eq!(event(&evs, "swap_result").unwrap()["data"]["error"], "venue used 0");
     assert_eq!(ft_bal(&e.worker, WRAP, &e.vault).await, near(1));
     assert_eq!(ft_bal(&e.worker, MEME, &e.vault).await, 0);
     assert!(n0 - near_bal(&e.worker, &e.vault).await < near(1) + near(1) / 10);
@@ -344,6 +349,37 @@ async fn register_token_pays_storage_once() -> anyhow::Result<()> {
     let r = e.bot_call("register_token", json!({"token_id": MEME})).await?;
     assert!(r.is_success());
     assert!(event(&events(&r.logs()), "token_registered").is_none(), "second call skips");
+    Ok(())
+}
+
+/// Mock FT storage min: 0.00125 NEAR.
+const STORAGE_MIN: u128 = 1_250_000_000_000_000_000_000;
+
+#[tokio::test]
+async fn storage_budget_caps_registrations() -> anyhow::Result<()> {
+    let e = setup().await?;
+    // Room for exactly one registration in this window.
+    assert!(e.owner_call("set_storage_budget", json!({"per_day": (2 * STORAGE_MIN - 1).to_string()})).await.is_success());
+    e.register(MEME).await;
+    let st = e.state().await["storage_budget"].clone();
+    assert_eq!(st["spent"], STORAGE_MIN.to_string());
+    assert_ne!(st["window_start"], "0");
+    let r = e.bot_call("register_token", json!({"token_id": RHEA})).await?;
+    assert!(r.is_failure(), "bot can't exceed the budget");
+    assert!(format!("{:?}", r.failures()).contains("storage budget exceeded"));
+    assert!(view::<Value>(&e.worker, RHEA, "storage_balance_of", json!({"account_id": e.vault})).await.is_null());
+    assert_eq!(e.state().await["storage_budget"]["spent"], STORAGE_MIN.to_string());
+
+    // Used up exactly: the call fails before any cross-contract call.
+    assert!(e.owner_call("set_storage_budget", json!({"per_day": STORAGE_MIN.to_string()})).await.is_success());
+    let r = e.bot_call("register_token", json!({"token_id": RHEA})).await?;
+    assert!(r.is_failure());
+    assert!(r.receipt_outcomes()[0].is_failure(), "panics in the first receipt");
+
+    // Owner raises it: works again.
+    assert!(e.owner_call("set_storage_budget", json!({"per_day": (near(1) / 10).to_string()})).await.is_success());
+    e.register(RHEA).await;
+    assert_eq!(e.state().await["storage_budget"]["spent"], (2 * STORAGE_MIN).to_string());
     Ok(())
 }
 
@@ -377,6 +413,7 @@ async fn bot_key_limited_to_swap_and_register() -> anyhow::Result<()> {
         ("sell", sell.clone()),
         ("pause", json!({})),
         ("unpause", json!({})),
+        ("set_storage_budget", json!({"per_day": near(10).to_string()})),
         ("set_bot_key", json!({"public_key": SecretKey::from_random(KeyType::ED25519).public_key(), "allowance": "1"})),
         ("remove_bot_key", json!({})),
         ("owner_upgrade", json!({"code_hash": "11111111111111111111111111111111"})),
@@ -447,6 +484,8 @@ async fn stranger_can_not_move_funds() -> anyhow::Result<()> {
         ("withdraw_token", json!({"token_id": MEME, "amount": null})),
         ("sell", sell),
         ("pause", json!({})),
+        ("set_storage_budget", json!({"per_day": near(10).to_string()})),
+        ("on_registered", json!({"token_id": MEME, "deposit": "1", "window": "0"})),
         ("set_bot_key", json!({"public_key": e.mallory.secret_key().public_key(), "allowance": "1"})),
         ("remove_bot_key", json!({})),
         ("owner_upgrade", json!({"code_hash": "11111111111111111111111111111111"})),

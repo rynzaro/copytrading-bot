@@ -61,7 +61,7 @@ def test_sent_row_settled_filled_by_hash(env):
     (swap_error("vault not registered on wrap.near"), "not_registered"),
     (swap_error(f"ft_balance_of failed on {MEME}"), "balance_check_failed"),
     (swap_error("ft_balance_of failed on wrap.near"), "balance_check_failed"),
-    (swap_error("swap failed, input refunded"), "swap_refunded"),
+    (swap_error("venue used 0"), "swap_refunded"),
 ])
 def test_sent_row_settled_failed_and_reusable(env, res, reason):
     db, rpc, ex = env
