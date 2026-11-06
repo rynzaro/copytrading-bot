@@ -11,7 +11,7 @@ export const HOST = 'copytrade.example'
 
 export function harness(opts: { keys?: Record<string, 'full' | 'function_call'> } = {}) {
   const db = openDb(':memory:', { requireSchema: true })
-  const nonces = new NonceStore(new Uint8Array(32).fill(9))
+  const nonces = new NonceStore(new Uint8Array(32).fill(9), db)
   const keys = opts.keys ?? {}
   const views: { contract: string; method: string; args: object }[] = []
   const rpc: Rpc = {

@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at  INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS login_nonces (    -- used NEP-413 login nonces, web only: single use across restarts
+  nonce       TEXT PRIMARY KEY,               -- hex of the 32-byte nonce
+  expires_at  INTEGER NOT NULL                -- issue time + TTL; expired rows are deleted
+);
+
 CREATE TABLE IF NOT EXISTS signals (
   id          INTEGER PRIMARY KEY,
   target_id   TEXT NOT NULL,
