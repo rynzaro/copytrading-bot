@@ -127,7 +127,7 @@ Implicit owners (64-hex accounts): not supported by this flow. Account ids are a
 
 ## Build and test
 
-Toolchain: `rust-toolchain.toml` pins Rust 1.95.0 + `wasm32-unknown-unknown` (cargo-near 0.23 template version). Use rustup's cargo (`~/.cargo/bin` first on PATH); Homebrew cargo ignores the pin.
+Toolchain: `rust-toolchain.toml` pins Rust 1.95.0 + `wasm32-unknown-unknown` for local builds (cargo-near 0.23 template version). Use rustup's cargo (`~/.cargo/bin` first on PATH); Homebrew cargo ignores the pin. The reproducible build uses the Docker image pinned by digest in `Cargo.toml` (`sourcescan/cargo-near:0.22.0-rust-1.99.1`); that wasm is the one to publish, and its hash changes with every commit (NEP-330 metadata embeds the commit). The full sandbox suite passed against it (212,102 bytes).
 
 ```sh
 cd contracts/vault
