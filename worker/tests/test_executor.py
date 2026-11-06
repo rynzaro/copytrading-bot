@@ -10,7 +10,7 @@ from copytrade_worker.chain import RpcDown
 from copytrade_worker.db import claim_copy_buy, connect
 from copytrade_worker.types import Hop, MinOutInputs, Plan
 
-from .fakes import FakeRpc, event, outcome, ref_pool
+from .fakes import FakeRpc, event, outcome, ref_pool, swap_error
 
 E24, E18 = 10 ** 24, 10 ** 18
 MEME, OWNER, VAULT = "meme.near", "alice.near", "alice-vault.near"
@@ -60,6 +60,9 @@ def swap_args(sent):
     return json.loads(raw[i + 4:i + 4 + n])
 
 
+REFUND = "swap failed, input refunded"
+
+
 def filled(amount="9000"):
     return outcome([event("swap_result", {"token_out": MEME, "amount_out": amount})])
 
@@ -98,19 +101,19 @@ def test_register_failure_marks_failed(env):
 
 def test_retry_then_fill(env):
     db, rpc, ks, ex = env
-    rpc.outcomes = [outcome([event("swap_result", {"token_out": MEME, "error": "min_out"})]), filled()]
+    rpc.outcomes = [swap_error(REFUND), filled()]
     assert go(ex, plan(slip=100)) == "filled"
     assert len(rpc.sent) == 2
 
 
 def test_retry_exhausted_marks_failed(env):
     db, rpc, ks, ex = env
-    rpc.outcomes = [outcome(failure={"x": 1})] * 3
+    rpc.outcomes = [swap_error(REFUND)] * 3
     assert go(ex, plan(slip=100)) == "failed"
     assert len(rpc.sent) == 3
     r = row(db)
-    assert r["status"] == "failed" and r["reason"] == "swap_failed"
-    assert acts(db, "buy_failed")[0][1] == {"token_id": MEME, "amount_in": str(10 * E24), "reason": "swap_failed",
+    assert r["status"] == "failed" and r["reason"] == "swap_refunded"
+    assert acts(db, "buy_failed")[0][1] == {"token_id": MEME, "amount_in": str(10 * E24), "reason": "swap_refunded",
                                             "tx_hash": r["tx_hash"]}
 
 
@@ -119,7 +122,7 @@ def test_retry_stops_when_price_leaves_guard(env):
 
     def pump(r):  # after the first failed attempt the pool price jumps 3x
         r.ref[7] = ref_pool(R.WNEAR, MEME, 3000 * E24, 10 ** 6 * E18 // 1, fee=30)
-        return outcome(failure={"x": 1})
+        return swap_error(REFUND)
     rpc.outcomes = [pump]
     assert go(ex, plan(guard=2.0)) == "failed"
     assert len(rpc.sent) == 1 and row(db)["reason"] == "price_guard"
@@ -142,7 +145,7 @@ def test_unknown_outcome_not_resent_stays_sent(env):
 
 def test_one_buy_per_token_and_failed_row_reused(env):
     db, rpc, ks, ex = env
-    rpc.outcomes = [outcome(failure={"x": 1})] * 3 + [filled()]
+    rpc.outcomes = [swap_error(REFUND)] * 3 + [filled()]
     assert go(ex, plan()) == "failed"
     assert go(ex, plan(signal_id=2)) == "filled"
     assert row(db)["signal_id"] == 2
@@ -234,10 +237,41 @@ def test_bot_key_mismatch(env):
 
 
 def test_events_ignores_foreign_standard_and_junk():
-    o = {"receipts_outcome": [{"outcome": {"logs": [
+    o = {"receipts_outcome": [{"outcome": {"executor_id": VAULT, "logs": [
         "EVENT_JSON:{bad", 'EVENT_JSON:{"standard":"other","event":"swap_result","data":[{"amount_out":"9"}]}',
         event("swap_result", {"amount_out": "5"}), 7]}}]}
-    assert X.events(o) == [{"event": "swap_result", "amount_out": "5"}]
+    assert X.events(o, VAULT) == [{"event": "swap_result", "amount_out": "5"}]
+
+
+def test_events_only_from_the_vault():
+    """Any contract can log our standard. Only receipts the vault executed count."""
+    o = {"receipts_outcome": [{"outcome": {"executor_id": MEME, "logs": [event("swap_result", {"error": "paused"})]}},
+                              {"outcome": {"logs": [event("swap_result", {"error": "paused"})]}}]}
+    assert X.events(o, VAULT) == []
+
+
+@pytest.mark.parametrize("res", [
+    swap_error("output balance unknown"),
+    swap_error("min_out"),
+    outcome(failure={"ActionError": "x"}, failed_at="later"),
+])
+def test_input_maybe_spent_never_resent_row_stays_sent(env, res):
+    """Double-buy guard: the venue may have taken the input. One send, row 'sent', token blocked."""
+    db, rpc, ks, ex = env
+    rpc.outcomes = [res, filled()]
+    assert go(ex, plan(slip=100)) == "sent"
+    assert len(rpc.sent) == 1 and row(db)["status"] == "sent" and acts(db, "buy_failed") == []
+    assert go(ex, plan(signal_id=2)) == "duplicate"
+    assert len(rpc.sent) == 1
+
+
+@pytest.mark.parametrize("error,reason", [("paused", "paused"), ("amount_in above balance", "balance_low"),
+                                          (f"vault not registered on {MEME}", "not_registered")])
+def test_proven_no_input_not_retried_unless_refund(env, error, reason):
+    db, rpc, ks, ex = env
+    rpc.outcomes = [swap_error(error), filled()]
+    assert go(ex, plan()) == "failed"
+    assert len(rpc.sent) == 1 and row(db)["reason"] == reason
 
 
 def test_loop_consumes_queue(env):

@@ -46,8 +46,25 @@ describe('sessions', () => {
 describe('login nonce', () => {
   const secret = new Uint8Array(32).fill(1)
 
+  it('stays single use across a restart (new store, same DB and secret)', () => {
+    const fresh = openDb(':memory:', { requireSchema: true })
+    const n = new NonceStore(secret, fresh).issue(1000)
+    expect(new NonceStore(secret, fresh).consume(n, 2000)).toBe(true)
+    expect(new NonceStore(secret, fresh).consume(n, 2000)).toBe(false)
+  })
+
+  it('deletes expired used nonces', () => {
+    const fresh = openDb(':memory:', { requireSchema: true })
+    const s = new NonceStore(secret, fresh)
+    expect(s.consume(s.issue(0), 0)).toBe(true)
+    const count = () => (fresh.prepare('SELECT count(*) AS c FROM login_nonces').get() as { c: number }).c
+    expect(count()).toBe(1)
+    expect(s.consume(s.issue(NonceStore.TTL_MS + 1), NonceStore.TTL_MS + 1)).toBe(true)
+    expect(count()).toBe(1)
+  })
+
   it('issues 32-byte nonces that verify once', () => {
-    const s = new NonceStore(secret)
+    const s = new NonceStore(secret, db)
     const n = s.issue(1000)
     expect(Buffer.from(n, 'base64')).toHaveLength(32)
     expect(s.consume(n, 2000)).toBe(true)
@@ -55,8 +72,8 @@ describe('login nonce', () => {
   })
 
   it('rejects forged, foreign, expired and future nonces', () => {
-    const s = new NonceStore(secret)
-    const other = new NonceStore(new Uint8Array(32).fill(2))
+    const s = new NonceStore(secret, db)
+    const other = new NonceStore(new Uint8Array(32).fill(2), db)
     expect(s.consume(other.issue(1000), 1000)).toBe(false)
     expect(s.consume(Buffer.alloc(32).toString('base64'), 1000)).toBe(false)
     expect(s.consume('short', 1000)).toBe(false)

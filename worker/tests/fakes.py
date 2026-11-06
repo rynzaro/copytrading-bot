@@ -13,10 +13,31 @@ def event(name, data):
     return "EVENT_JSON:" + json.dumps(e)
 
 
-def outcome(logs=(), failure=None):
-    st = {"Failure": failure} if failure else {"SuccessValue": ""}
-    return {"status": st, "transaction_outcome": {"outcome": {"logs": [], "status": {"SuccessReceiptId": "x"}}},
-            "receipts_outcome": [{"outcome": {"logs": list(logs), "status": st}}]}
+VAULT = "alice-vault.near"
+
+
+def outcome(logs=(), failure=None, failed_at="first", emitter=VAULT, failed_executor=VAULT):
+    """Tx outcome like the RPC's. Receipt r0 = the vault call itself (tx's first receipt); logs come from r1
+    (a vault callback) when there is one. failed_at: 'first' = the vault call itself panicked; 'later' = a
+    later receipt (executor failed_executor) failed after the call ran."""
+    ok = {"SuccessValue": ""}
+    fail = {"Failure": failure} if failure else None
+    rs = [{"id": "r0", "outcome": {"executor_id": VAULT, "logs": [], "status": ok, "receipt_ids": ["r1"]}},
+          {"id": "r1", "outcome": {"executor_id": emitter, "logs": list(logs), "status": ok, "receipt_ids": []}}]
+    if fail and failed_at == "first":
+        rs = [{"id": "r0", "outcome": {"executor_id": VAULT, "logs": list(logs), "status": fail, "receipt_ids": []}}]
+    elif fail:
+        rs.append({"id": "r2", "outcome": {"executor_id": failed_executor, "logs": [], "status": fail,
+                                           "receipt_ids": []}})
+    return {"status": fail or ok,
+            "transaction_outcome": {"id": "t", "outcome": {"executor_id": VAULT, "logs": [], "receipt_ids": ["r0"],
+                                                           "status": {"SuccessReceiptId": "r0"}}},
+            "receipts_outcome": rs}
+
+
+def swap_error(error, token_out="meme.near", **kw):
+    """Outcome whose vault callback emitted swap_result {error}."""
+    return outcome([event("swap_result", {"token_out": token_out, "error": error})], **kw)
 
 
 class FakeRpc:

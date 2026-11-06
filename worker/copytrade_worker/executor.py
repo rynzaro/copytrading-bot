@@ -5,8 +5,9 @@ copy_buys row before it queues the Plan. The executor never inserts; it only act
 'planned' for the plan's signal_id, and moves it to 'sent' / 'filled' / 'failed'.
 
 DRY_RUN=1 (default): build and sign, don't send; log the would-be tx (no key material).
-Retry: resend while the price is within limits and the failure is a clear swap failure; then mark failed.
-An unknown outcome (timeout) is never resent: the row stays 'sent' so the token stays blocked.
+Retry: resend while the price is within limits and the outcome proves no input left the vault (classify,
+NO_INPUT_LEFT); then mark failed. Any other outcome (timeout, "output balance unknown", a later receipt
+failed) is unknown and never resent: the row stays 'sent' so the token stays blocked.
 Reconciler (`reconcile`, run by `loop` at start and every `reconcile_s`): looks up each 'sent' row's tx by hash
 and settles it 'filled' / 'failed' from the outcome. It never signs or sends. Same thread as the plans, so it
 never races an in-flight wait.
@@ -48,11 +49,16 @@ class Fail(Exception):
         super().__init__(reason)
 
 
-def events(outcome: dict) -> list[dict]:
-    """NEP-297 events of our vault standard from all receipt logs. Untrusted: parsed defensively."""
+def events(outcome: dict, emitter: str) -> list[dict]:
+    """NEP-297 events of our vault standard from receipts executed by `emitter` (the vault). Any contract can
+    log our standard (a token's ft_balance_of could forge a swap_result), so other receipts don't count.
+    Untrusted: parsed defensively."""
     out = []
     for r in outcome.get("receipts_outcome") or []:
-        for line in (r.get("outcome") or {}).get("logs") or []:
+        o = r.get("outcome") if isinstance(r, dict) else None
+        if not isinstance(o, dict) or o.get("executor_id") != emitter:
+            continue
+        for line in o.get("logs") or []:
             if not isinstance(line, str) or not line.startswith("EVENT_JSON:"):
                 continue
             try:
@@ -92,21 +98,83 @@ def is_final(res: dict | None) -> bool:
     return isinstance(st, dict) and bool(st.keys() & FINAL)
 
 
-def classify(res: dict) -> tuple[str, str | None]:
-    """Swap outcome -> ('filled', amount_out) | ('failed', reason) | ('unknown', None). Untrusted data."""
-    ev = [e for e in events(res) if e.get("event") == "swap_result"]
-    fail = tx_failure(res)
-    if ev and "amount_out" in ev[-1] and not ev[-1].get("error") and not fail:
+# Vault `swap_result` errors that prove no input left the vault (contracts/vault/src/lib.rs on_swap_checked:
+# before any transfer; on_swap_sent: the venue used 0 and the input came back). Error -> reason code.
+# `{token}` = the bought token or wrap.near. Any other error, or none, does not prove it.
+NO_INPUT_LEFT = {
+    "paused": "paused",
+    "vault not registered on {token}": "not_registered",
+    "ft_balance_of failed on {token}": "balance_check_failed",
+    "amount_in above balance": "balance_low",
+    "swap failed, input refunded": "swap_refunded",
+}
+# Vault errors emitted after the venue consumed the input: outcome unknown, never resent.
+INPUT_MAYBE_LEFT = {"output balance unknown"}
+# Failed reasons worth a resend (price may have moved back). The rest are deterministic.
+RETRY_REASONS = {"swap_refunded"}
+
+
+def _receipt_failures(res: dict) -> list[tuple[str | None, str | None, str]]:
+    """(receipt id, executor, failure json) for each failed receipt."""
+    out = []
+    for r in res.get("receipts_outcome") or []:
+        o = r.get("outcome") if isinstance(r, dict) else None
+        if not isinstance(o, dict):
+            continue
+        rs = o.get("status")
+        if isinstance(rs, dict) and "Failure" in rs:
+            out.append((r.get("id"), o.get("executor_id"), json.dumps(rs["Failure"])[:300]))
+    return out
+
+
+def _first_receipt(res: dict) -> str | None:
+    """Id of the receipt the tx converted into (the vault call itself)."""
+    o = (res.get("transaction_outcome") or {}).get("outcome") or {}
+    ids = o.get("receipt_ids") if isinstance(o, dict) else None
+    return ids[0] if isinstance(ids, list) and ids and isinstance(ids[0], str) else None
+
+
+def _no_input_reason(error: Any, token_id: str) -> str | None:
+    if not isinstance(error, str):
+        return None
+    for pattern, reason in NO_INPUT_LEFT.items():
+        if "{token}" in pattern:
+            if error in {pattern.format(token=t) for t in (token_id, R.WNEAR)}:
+                return reason
+        elif error == pattern:
+            return reason
+    return None
+
+
+def classify(res: dict, vault_id: str, token_id: str) -> tuple[str, str | None]:
+    """Swap outcome -> ('filled', amount_out) | ('failed', reason) | ('unknown', None). Untrusted data.
+
+    'failed' only when the outcome proves no input left the vault (the row may then be resent or reused);
+    everything else that isn't a clean fill is 'unknown' (row stays 'sent', never resent)."""
+    ev = [e for e in events(res, vault_id) if e.get("event") == "swap_result"]
+    fails = _receipt_failures(res)
+    last = ev[-1] if ev else None
+    if last is not None and "amount_out" in last and not last.get("error") and not fails:
         try:
-            out = int(ev[-1]["amount_out"])
+            out = int(last["amount_out"])
         except (TypeError, ValueError):
             return "unknown", None
         return ("filled", str(out)) if out >= 0 else ("unknown", None)
-    if fail and "paused" in fail.lower():
-        return "failed", "paused"
-    if ev or fail:
-        return "failed", "swap_failed"
-    return "unknown", None  # success without our event: can't tell if tokens arrived
+    if last is not None and last.get("error"):
+        reason = _no_input_reason(last["error"], token_id)
+        if reason is None:
+            return "unknown", None
+        # "input refunded" is also what the vault says when ft_transfer_call's result was unreadable. If a
+        # wrap.near receipt failed (e.g. ft_resolve_transfer), the refund isn't proven.
+        if reason == "swap_refunded" and any(ex == R.WNEAR for _, ex, _ in fails):
+            return "unknown", None
+        return "failed", reason
+    # No verdict from the vault. Proven only if the vault call itself panicked: its promises never ran.
+    first = _first_receipt(res)
+    for rid, ex, text in fails:
+        if first is not None and rid == first and ex == vault_id:
+            return "failed", "paused" if "paused" in text.lower() else "swap_rejected"
+    return "unknown", None  # success without our event, or a later receipt failed: can't tell
 
 
 class Executor:
@@ -223,7 +291,7 @@ class Executor:
             raise Fail("register_unknown")
         if tx_failure(res):
             raise Fail("register_failed")
-        dep = next((e.get("deposit") for e in events(res) if e.get("event") == "token_registered"), None)
+        dep = next((e.get("deposit") for e in events(res, plan.vault_id) if e.get("event") == "token_registered"), None)
         if dep is not None:
             self._activity(plan.owner_id, "storage_paid", {"token_id": plan.token_id, "amount": str(int(dep))})
 
@@ -267,16 +335,17 @@ class Executor:
             log.warning("swap outcome unknown tx=%s owner=%s token=%s", tx.hash, plan.owner_id, plan.token_id)
             self._activity(plan.owner_id, "system", {"text": f"buy {plan.token_id}: outcome unknown, tx {tx.hash}"})
             return "sent"
-        kind, val = classify(res)
+        kind, val = classify(res, plan.vault_id, plan.token_id)
         if kind == "filled":
             self._update(plan, status="filled", amount_out=val, reason=None)
             self._activity(plan.owner_id, "buy_filled", {"token_id": plan.token_id, "amount_in": str(amount_in),
                                                          "amount_out": val, "tx_hash": tx.hash})
             return "filled"
         if kind == "failed":
-            raise Fail(val or "swap_failed", retry=val != "paused")
-        # Can't tell if tokens arrived. Don't resend.
-        self._activity(plan.owner_id, "system", {"text": f"buy {plan.token_id}: no swap_result, tx {tx.hash}"})
+            raise Fail(val or "swap_failed", retry=val in RETRY_REASONS)
+        # Input may have left the vault. Never resend: the row stays 'sent', the token stays blocked.
+        log.warning("swap outcome without proof tx=%s owner=%s token=%s", tx.hash, plan.owner_id, plan.token_id)
+        self._activity(plan.owner_id, "system", {"text": f"buy {plan.token_id}: outcome unknown, tx {tx.hash}"})
         return "sent"
 
     def run(self, plan: Plan) -> str:
@@ -342,7 +411,7 @@ class Executor:
                 continue
             if not res or not is_final(res):
                 continue
-            kind, val = classify(res)
+            kind, val = classify(res, r["vault_id"], r["token_id"])
             if kind == "unknown":
                 log.info("reconcile: outcome without verdict tx=%s owner=%s token=%s", r["tx_hash"], r["owner_id"],
                          r["token_id"])
