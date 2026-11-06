@@ -156,6 +156,14 @@ class Chain:
             raise RpcError("bad access key reply")
         return res
 
+    def view_account(self, account: str) -> dict[str, Any]:
+        """Account view (`code_hash`, and `global_contract_hash` / `global_contract_account_id` when it uses a
+        global contract). Raises RpcError, RpcDown."""
+        res = self.call("query", {"request_type": "view_account", "finality": "final", "account_id": account})
+        if not isinstance(res, dict):
+            raise RpcError("bad account reply")
+        return res
+
     def block_hash(self) -> str:
         res = self.call("block", {"finality": "final"})
         try:

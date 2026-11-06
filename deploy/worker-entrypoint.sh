@@ -4,7 +4,7 @@
 set -e
 umask 007
 chmod 2770 "$DATA_DIR" 2>/dev/null || echo "warn: cannot chmod $DATA_DIR (owner should be 10001:10001, mode 2770)" >&2
-db="$DATA_DIR/worker.db"
+db="${DB_PATH:-$DATA_DIR/copytrade.db}"  # shared with web: docs/interfaces/worker-api.md "Shared DB file"
 [ -e "$db" ] || : > "$db"
 chmod 660 "$db" 2>/dev/null || true
 exec python -m copytrade_worker

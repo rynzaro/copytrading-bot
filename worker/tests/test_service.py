@@ -43,7 +43,7 @@ def wait(cond, s=5.0):
 def test_signal_to_dry_run_executor(worker):
     w, rpc, tmp = worker
     assert w.executor.dry_run is True
-    conn = db.connect(str(tmp / "worker.db"))
+    conn = db.connect(str(tmp / "copytrade.db"))
     pk = w.executor.ks.ensure("a.near")
     conn.execute(
         "insert into users(owner_id, vault_id, bot_public_key, bot_on, settings, created_at) values (?,?,?,1,?,0)",
@@ -70,7 +70,7 @@ def test_dry_run_builds_swap_and_never_sends(worker):
     meme = "meme.near"
     rpc.ref[7] = ref_pool(R.WNEAR, meme, 1000 * E24, 10**6 * E18)
     rpc.storage[(meme, "v.a.near")] = {"total": "1", "available": "0"}
-    conn = db.connect(str(tmp / "worker.db"))
+    conn = db.connect(str(tmp / "copytrade.db"))
     pk = w.executor.ks.ensure("a.near")
     conn.execute(
         "insert into users(owner_id, vault_id, bot_public_key, bot_on, created_at) values ('a.near','v.a.near',?,1,0)",
@@ -136,3 +136,32 @@ def test_run_refuses_live_without_config(tmp_path, monkeypatch):
     msg = str(e.value)
     assert "DRY_RUN=0" in msg and "VAULT_CODE_HASH" in msg and "RPC_URLS" in msg and "DATA_DIR" in msg
     assert not (tmp_path / "data").exists()   # refused before touching disk
+
+
+def test_db_path_default_and_override(monkeypatch, tmp_path):
+    # docs/interfaces/worker-api.md "Shared DB file": $DATA_DIR/copytrade.db, DB_PATH overrides (web does the same).
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("DB_PATH", raising=False)
+    assert service.db_path() == str(tmp_path / "copytrade.db")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "x.db"))
+    assert service.db_path() == str(tmp_path / "x.db")
+
+
+def test_run_opens_shared_db_file(worker):
+    _, _, tmp = worker
+    assert (tmp / "copytrade.db").exists() and not (tmp / "worker.db").exists()
+
+
+def test_register_wrap_after_confirm(tmp_path):
+    from copytrade_worker import keys as K
+    from copytrade_worker.executor import Executor
+    conn = db.connect(str(tmp_path / "c.db"))
+    rpc, ks = FakeRpc(), K.KeyStore(tmp_path)
+    ks.ensure("alice.near")
+    live = Executor(conn, rpc, ks, dry_run=False)
+    rpc.storage[("wrap.near", "copytrade.alice.near")] = None
+    service.register_wrap(live)("alice.near", "copytrade.alice.near")
+    assert len(rpc.sent) == 1 and b"register_token" in rpc.sent[0]["raw"] and b'"wrap.near"' in rpc.sent[0]["raw"]
+    rpc.storage[("wrap.near", "copytrade.alice.near")] = {"total": "1", "available": "0"}
+    service.register_wrap(live)("alice.near", "copytrade.alice.near")
+    assert len(rpc.sent) == 1, "already registered: nothing sent"

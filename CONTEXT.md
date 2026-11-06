@@ -11,7 +11,7 @@ Hosted web app. Users copy meme-token buys of chosen whale wallets on NEAR mainn
 - **Copy target**: a whale wallet whose meme buys a user copies.
 - **Curated list**: the copy targets the app suggests, each with a research note. A user can also enter any account.
 - **Signal**: one meme swap buy by a copy target, seen in the feed after it executes. Only signals trigger copy buys.
-- **Limit-order alert**: a notice that a copy target placed a DCL limit buy order. No copy buy follows.
+- **Limit-order alert**: a notice that a copy target placed, or later filled, a DCL limit buy order. No copy buy follows. Users can switch it off.
 - **Copy buy**: the bot's buy for one user after a signal. At most one per token per user, ever. Tokens the user holds from elsewhere don't block it.
 - **Meme token**: any token that is not on the non-meme denylist (wNEAR, stables, LSTs, RHEA/REF, BRRR, bridged majors).
 - **Quote token**: the token the bot pays with. v1: wNEAR.

@@ -120,3 +120,15 @@ def test_env_urls(monkeypatch):
     assert chain.Chain().rpcs == ["https://one"]
     monkeypatch.setenv("RPC_URLS", "https://x, https://y")
     assert chain.Chain().rpcs == ["https://x", "https://y"]
+
+
+def test_view_account():
+    acct = {"amount": "1", "code_hash": "1" * 32,
+            "global_contract_hash": "8kPzWhcBXaQX3rUJzNJo2U8KcU9xUZoTT3qQKcVN3r3H"}
+    c, f = mk([{"result": acct}])
+    assert c.view_account("v.near") == acct
+    p = f.calls[0][1]["params"]
+    assert p == {"request_type": "view_account", "finality": "final", "account_id": "v.near"}
+    c, _ = mk([{"result": None}])
+    with pytest.raises(RpcError):
+        c.view_account("v.near")
