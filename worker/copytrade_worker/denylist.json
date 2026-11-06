@@ -1,0 +1,35 @@
+{
+  "_note": "Non-meme denylist: exact contracts, then account suffixes. Launchpad suffixes (launchpads.json) win. The vault contract copies this list at build time (docs/interfaces/vault.md).",
+  "exact": {
+    "wrap.near": "wNEAR",
+    "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1": "USDC",
+    "usdt.tether-token.near": "USDt",
+    "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48.factory.bridge.near": "USDC.e",
+    "dac17f958d2ee523a2206206994597c13d831ec7.factory.bridge.near": "USDT.e",
+    "6b175474e89094c44da98b954eedeac495271d0f.factory.bridge.near": "DAI",
+    "usn": "USN",
+    "meta-pool.near": "stNEAR",
+    "linear-protocol.near": "LiNEAR",
+    "v2-nearx.stader-labs.near": "NearX",
+    "lst.rhealab.near": "rNEAR",
+    "token.rhealab.near": "RHEA",
+    "xtoken.rhealab.near": "xRHEA",
+    "token.v2.ref-finance.near": "REF",
+    "xtoken.ref-finance.near": "xREF",
+    "token.burrow.near": "BRRR",
+    "aurora": "ETH (Aurora)",
+    "nbtc.bridge.near": "nBTC",
+    "token.sweat": "SWEAT",
+    "meta-token.near": "META",
+    "mpdao-token.near": "mpDAO",
+    "token.publicailab.near": "PUBLIC",
+    "npro.nearmobile.near": "NPRO",
+    "itlx.intellex_xyz.near": "ITLX"
+  },
+  "suffix": {
+    ".factory.bridge.near": "bridged ERC-20 (Rainbow)",
+    ".omft.near": "bridged asset (NEAR Intents)",
+    ".omdep.near": "bridged asset (NEAR Intents)",
+    ".bridge.near": "bridged asset"
+  }
+}

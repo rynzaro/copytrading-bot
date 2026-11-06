@@ -1,0 +1,39 @@
+[project]
+name = "copytrade-worker"
+version = "0.1.0"
+description = "Copytrading worker: feeds, signals, rules, executor, notifications"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+  # executor (0006): ed25519 signing of bot-key transactions
+  "cryptography>=42",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["copytrade_worker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+markers = ["live: hits public network; opt-in with RUN_LIVE=1"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "I"]
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["copytrade_worker"]
+check_untyped_defs = true
+warn_unused_ignores = true
