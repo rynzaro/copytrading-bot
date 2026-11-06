@@ -48,3 +48,4 @@ export function sellRoute(signal: { venue: string | null; pool_id: string | null
   } else if (!/^\d+$/.test(signal.pool_id)) return null
   return { venue: signal.venue, hop: { pool_id: signal.pool_id, token_in: token, token_out: WRAP } }
 }
+export const removeBotKeyTx = (vault: string) => tx(vault, 'Remove bot key', 'remove_bot_key', {})

@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@headlessui/react": "2.2.10",
+    "@near-js/transactions": "2.5.1",
     "@near-wallet-selector/core": "10.1.4",
     "@near-wallet-selector/hot-wallet": "10.1.4",
     "@near-wallet-selector/intear-wallet": "10.1.4",
@@ -23,7 +24,9 @@
     "@noble/hashes": "2.4.0",
     "better-sqlite3": "13.0.3",
     "bs58": "6.0.0",
+    "buffer": "6.0.3",
     "clsx": "2.1.1",
+    "near-api-js": "6.2.5",
     "near-seed-phrase": "0.2.1",
     "next": "16.4.5",
     "react": "19.3.1",

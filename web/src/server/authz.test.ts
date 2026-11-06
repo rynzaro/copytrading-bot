@@ -109,7 +109,7 @@ describe('bot toggle and owner flows', () => {
 
   it('positions carry the on-chain vault balance', async () => {
     const p = await get('/positions', b)
-    expect(p[0]).toMatchObject({ balance: '42', can_sell: true })
+    expect(p[0]).toMatchObject({ balance: '42', can_sell: true, symbol: null, decimals: 18 })
     expect(h.views.find((v) => v.method === 'ft_balance_of')).toMatchObject({ contract: 'bobtok.near', args: { account_id: 'vault.bob.near' } })
   })
 })

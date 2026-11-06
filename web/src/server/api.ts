@@ -64,7 +64,7 @@ export function createApi(d: ApiDeps) {
     if (m === 'POST' && path === '/auth/login') {
       const b = await body(req)
       const r = await login(
-        { accountId: b.accountId, publicKey: b.publicKey, signature: b.signature, nonce: b.nonce },
+        { accountId: b.accountId, publicKey: b.publicKey, signature: b.signature, nonce: b.nonce, callbackUrl: b.callbackUrl },
         { db: d.db, nonces: d.nonces, rpc: d.rpc, recipient: d.appHost, now: now() },
       )
       if (!r.ok) return err(r.status, r.error)
@@ -136,7 +136,15 @@ export function createApi(d: ApiDeps) {
                 const b = await d.rpc.view<unknown>(p.token_id, 'ft_balance_of', { account_id: me.vault_id })
                 balance = typeof b === 'string' && /^\d{1,40}$/.test(b) ? b : null
               } catch {}
-            return { ...p, balance, can_sell: sellRoute(p, p.token_id) !== null }
+            let symbol: string | null = null
+            let decimals: number | null = null
+            try {
+              const md = await d.rpc.view<{ symbol?: unknown; decimals?: unknown }>(p.token_id, 'ft_metadata', {})
+              // Token metadata is untrusted: short plain symbols only.
+              if (typeof md?.symbol === 'string' && /^[A-Za-z0-9$._-]{1,16}$/.test(md.symbol)) symbol = md.symbol
+              if (Number.isInteger(md?.decimals) && (md.decimals as number) >= 0 && (md.decimals as number) <= 32) decimals = md.decimals as number
+            } catch {}
+            return { ...p, balance, symbol, decimals, can_sell: sellRoute(p, p.token_id) !== null }
           }),
         )
         return json(out)

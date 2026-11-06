@@ -24,6 +24,7 @@ export function harness(opts: { keys?: Record<string, 'full' | 'function_call'> 
     async view<T>(contract: string, method: string, args: object) {
       views.push({ contract, method, args })
       if (method === 'ft_balance_of') return '42' as T
+      if (method === 'ft_metadata') return { symbol: 'BOB<script>', decimals: 18 } as T
       if (method === 'quote') return { amount: '10000' } as T
       if (method === 'get_return') return '10000' as T
       return {} as T

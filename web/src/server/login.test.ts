@@ -46,6 +46,21 @@ describe('login', () => {
     expect((await h.req('POST', '/auth/login', { body: evil.body })).status).toBe(401)
   })
 
+  it('accepts a signed callbackUrl only on this host', async () => {
+    const k = testKey()
+    const h = harness({ keys: { [`alice.near/${k.publicKey}`]: 'full' } })
+    for (const [cb, status] of [
+      ['https://evil.example/', 401],
+      [`https://${HOST}/`, 200],
+    ] as const) {
+      const n = await (await h.req('GET', '/auth/nonce')).json()
+      const nonce = new Uint8Array(Buffer.from(n.nonce, 'base64'))
+      const signature = signNep413(k, { message: LOGIN_MESSAGE, nonce, recipient: HOST, callbackUrl: cb })
+      const body = { accountId: 'alice.near', publicKey: k.publicKey, signature, nonce: n.nonce, callbackUrl: cb }
+      expect((await h.req('POST', '/auth/login', { body })).status).toBe(status)
+    }
+  })
+
   it('logout deletes the session', async () => {
     const h = harness()
     const token = h.login('alice.near')
