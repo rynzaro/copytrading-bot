@@ -1,7 +1,6 @@
 // Curated copy targets (DECISIONS: root.near, seriousfarmer.near only).
+import { TARGET_NOTES } from './target-notes'
+
 export type CuratedTarget = { id: string; note: string }
 
-export const CURATED: CuratedTarget[] = [
-  { id: 'root.near', note: 'Research note pending.' },
-  { id: 'seriousfarmer.near', note: 'Research note pending.' },
-]
+export const CURATED: CuratedTarget[] = ['root.near', 'seriousfarmer.near'].map((id) => ({ id, note: TARGET_NOTES[id] }))
